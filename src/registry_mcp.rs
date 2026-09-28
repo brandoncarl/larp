@@ -224,7 +224,12 @@ fn serve_inner<R: BufRead, W: Write>(
                 }) {
                     Ok(refreshed) => refreshed,
                     Err(_) => {
-                        error(&mut output, id, -32003, "Registry changed or unavailable; restart LARP if secret references changed")?;
+                        error(
+                            &mut output,
+                            id,
+                            -32003,
+                            "Could not refresh registry or secrets; check LARP and retry",
+                        )?;
                         continue;
                     }
                 };
@@ -429,7 +434,7 @@ fn serve_inner<R: BufRead, W: Write>(
                         let duration = started.elapsed().as_secs_f64();
                         match &result {
                             Ok(outcome) if outcome.timed_out => {
-                                eprintln!("⌛ {client_name} · {project} / {action} · timed out ({duration:.1}s)")
+                                eprintln!("✗ {client_name} · {project} / {action} · timed out ({duration:.1}s)")
                             }
                             Ok(outcome) if outcome.status == Some(0) => {
                                 eprintln!("✓ {client_name} · {project} / {action} · done ({duration:.1}s)")
@@ -441,7 +446,7 @@ fn serve_inner<R: BufRead, W: Write>(
                                     .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
                             ),
                             Err(message) if message == limits::BUSY => {
-                                eprintln!("⌛ {client_name} · {project} / {action} · busy")
+                                eprintln!("! {client_name} · {project} / {action} · busy")
                             }
                             Err(_) => {
                                 eprintln!("✗ {client_name} · {project} / {action} · rejected")

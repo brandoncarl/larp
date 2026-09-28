@@ -271,9 +271,24 @@ mod mac {
         Ok((name.to_owned(), client.identity.label(), parent.path))
     }
 
+    pub fn unregistered_process(bridge_pid: i32, uid: u32, registry: &Registry) -> Option<String> {
+        let bridge = snapshot(bridge_pid).ok()?;
+        if bridge.uid != uid || bridge.ppid <= 0 {
+            return None;
+        }
+        let parent = snapshot(bridge.ppid).ok()?;
+        if parent.uid != uid || registry.client_for_process(&parent.path).is_some() {
+            return None;
+        }
+        if snapshot(bridge_pid).ok()? != bridge || snapshot(parent.pid).ok()? != parent {
+            return None;
+        }
+        Some(parent.path)
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{capture, identify, snapshot, validate_running};
+        use super::{capture, identify, snapshot, unregistered_process, validate_running};
         use crate::registry::{Client, ClientIdentity, Registry};
         use std::collections::BTreeSet;
 
@@ -319,6 +334,10 @@ mod mac {
             let pid = child.id() as i32;
             let uid = unsafe { libc::geteuid() };
             assert!(identify(pid, uid, &Registry::default()).is_err());
+            assert_eq!(
+                unregistered_process(pid, uid, &Registry::default()),
+                Some(parent.path.clone())
+            );
             let mut registry = Registry::default();
             registry.clients.insert(
                 "test".into(),
@@ -331,15 +350,17 @@ mod mac {
                 },
             );
             assert_eq!(identify(pid, uid, &registry).unwrap().1, "path-only");
+            assert_eq!(unregistered_process(pid, uid, &registry), None);
             let _ = child.kill();
             let _ = child.wait();
             assert!(identify(pid, uid, &registry).is_err());
+            assert_eq!(unregistered_process(pid, uid, &Registry::default()), None);
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{capture, identify};
+pub use mac::{capture, identify, unregistered_process};
 
 #[cfg(not(target_os = "macos"))]
 pub fn capture(_: &str) -> Result<ClientIdentity, String> {
@@ -349,4 +370,9 @@ pub fn capture(_: &str) -> Result<ClientIdentity, String> {
 #[cfg(not(target_os = "macos"))]
 pub fn identify(_: i32, _: u32, _: &Registry) -> Result<(String, &'static str, String), String> {
     Err("verified caller identity currently requires macOS".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn unregistered_process(_: i32, _: u32, _: &Registry) -> Option<String> {
+    None
 }

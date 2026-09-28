@@ -77,6 +77,26 @@ pub struct RegisteredCommand {
 }
 
 impl Registry {
+    pub fn rename_project(&mut self, old: &str, new: &str) -> Result<(), String> {
+        name(new)?;
+        if !self.projects.contains_key(old) {
+            return Err("project does not exist".into());
+        }
+        if self.projects.contains_key(new) {
+            return Err("project name is already in use".into());
+        }
+        let project = self.projects.remove(old).expect("project checked above");
+        self.projects.insert(new.to_owned(), project);
+        for client in self.clients.values_mut() {
+            rename_grants(&mut client.commands, old, new);
+            rename_grants(&mut client.secrets, old, new);
+            if client.exec.remove(old) {
+                client.exec.insert(new.to_owned());
+            }
+        }
+        Ok(())
+    }
+
     pub fn load() -> Result<Self, String> {
         let Some(mut bytes) = storage::load_registry()? else {
             return Ok(Self::default());
@@ -104,6 +124,22 @@ impl Registry {
             .find(|(_, client)| client.process == path)
             .map(|(name, client)| (name.as_str(), client))
     }
+}
+
+fn rename_grants(grants: &mut BTreeSet<(String, String)>, old: &str, new: &str) {
+    *grants = std::mem::take(grants)
+        .into_iter()
+        .map(|(project, name)| {
+            (
+                if project == old {
+                    new.to_owned()
+                } else {
+                    project
+                },
+                name,
+            )
+        })
+        .collect();
 }
 
 pub fn name(value: &str) -> Result<(), String> {
@@ -140,7 +176,8 @@ pub fn env_name(value: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Registry;
+    use super::{Client, ClientIdentity, Project, RegisteredCommand, Registry};
+    use std::collections::BTreeSet;
 
     #[test]
     fn legacy_environment_bindings_are_ignored_and_removed_on_save() {
@@ -152,5 +189,65 @@ mod tests {
         );
         let saved = serde_json::to_string(&registry).unwrap();
         assert!(!saved.contains("\"env\""));
+    }
+
+    #[test]
+    fn rename_project_moves_commands_secrets_and_client_grants() {
+        let mut registry = Registry::default();
+        let mut project = Project {
+            cwd: "/tmp/example".into(),
+            ..Project::default()
+        };
+        project.commands.insert(
+            "check".into(),
+            RegisteredCommand {
+                argv: vec!["/bin/echo".into(), "ok".into()],
+                cwd: "/tmp/example".into(),
+            },
+        );
+        project
+            .secrets
+            .insert("token".into(), "op://vault/item/field".into());
+        registry.projects.insert("old".into(), project);
+        registry.projects.insert("other".into(), Project::default());
+        registry.clients.insert(
+            "agent".into(),
+            Client {
+                process: "/bin/true".into(),
+                identity: ClientIdentity::PathOnly,
+                commands: BTreeSet::from([
+                    ("old".into(), "check".into()),
+                    ("other".into(), "keep".into()),
+                ]),
+                secrets: BTreeSet::from([("old".into(), "token".into())]),
+                exec: BTreeSet::from(["old".into(), "other".into()]),
+            },
+        );
+        registry.rename_project("old", "new").unwrap();
+        assert!(!registry.projects.contains_key("old"));
+        assert_eq!(registry.projects["new"].cwd, "/tmp/example");
+        assert!(registry.projects["new"].commands.contains_key("check"));
+        assert_eq!(
+            registry.projects["new"].secrets["token"],
+            "op://vault/item/field"
+        );
+        let client = &registry.clients["agent"];
+        assert!(client.commands.contains(&("new".into(), "check".into())));
+        assert!(client.commands.contains(&("other".into(), "keep".into())));
+        assert!(client.secrets.contains(&("new".into(), "token".into())));
+        assert_eq!(client.exec, BTreeSet::from(["new".into(), "other".into()]));
+    }
+
+    #[test]
+    fn rename_project_rejects_invalid_changes_without_mutation() {
+        let mut registry = Registry::default();
+        registry.projects.insert("old".into(), Project::default());
+        registry.projects.insert("taken".into(), Project::default());
+        assert!(registry.rename_project("missing", "new").is_err());
+        assert!(registry.rename_project("old", "bad name").is_err());
+        assert!(registry.rename_project("old", "taken").is_err());
+        assert_eq!(registry.projects.len(), 2);
+        assert!(registry.projects.contains_key("old"));
+        assert!(registry.projects.contains_key("taken"));
     }
 }

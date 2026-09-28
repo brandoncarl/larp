@@ -76,6 +76,10 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
             project_mut(&mut registry, name)?.cwd = cwd;
             changed = true;
         }
+        ["project", "rename", old, new] => {
+            registry.rename_project(old, new)?;
+            changed = true;
+        }
         ["project", "remove", name] => {
             required_remove(registry.projects.remove(*name), "project")?;
             for client in registry.clients.values_mut() {
@@ -314,7 +318,7 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
             report.added, report.overwritten, report.identical, report.kept
         );
         if changed {
-            println!("Restart 'larp start' to load the updated secret references.");
+            println!("Updated references load on the next MCP call.");
         }
     }
     Ok(())
@@ -345,6 +349,7 @@ fn success_message(words: &[&str]) -> String {
         }
         [kind, "remove", name, ..] => format!("Removed {kind} {name}."),
         ["project", "cwd", name, ..] => format!("Updated working directory for {name}."),
+        ["project", "rename", old, new] => format!("Renamed project {old} to {new}."),
         _ => "Saved.".into(),
     }
 }

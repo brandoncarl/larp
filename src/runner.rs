@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
@@ -21,9 +21,30 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct Runner {
     pub registry: Registry,
-    values: Arc<BTreeMap<(String, String), Zeroizing<String>>>,
+    values: Option<Arc<SecretValues>>,
+    secrets: Arc<Mutex<SecretCache>>,
     commands: Arc<Counter>,
     path: Arc<Vec<PathBuf>>,
+}
+
+type SecretKey = (String, String);
+type SecretValues = BTreeMap<SecretKey, Arc<Zeroizing<String>>>;
+
+struct SecretCache {
+    references: BTreeMap<SecretKey, String>,
+    values: Arc<SecretValues>,
+}
+
+fn references(registry: &Registry) -> BTreeMap<SecretKey, String> {
+    registry
+        .projects
+        .iter()
+        .flat_map(|(project, item)| {
+            item.secrets
+                .iter()
+                .map(move |(name, reference)| ((project.clone(), name.clone()), reference.clone()))
+        })
+        .collect()
 }
 
 pub struct RunResult {
@@ -37,48 +58,81 @@ pub struct RunResult {
 
 impl Runner {
     pub fn secret_count(&self) -> usize {
-        self.values.len()
+        self.secrets
+            .lock()
+            .map(|cache| cache.values.len())
+            .unwrap_or(0)
+    }
+
+    fn values(&self) -> Result<Arc<SecretValues>, String> {
+        match &self.values {
+            Some(values) => Ok(Arc::clone(values)),
+            None => self
+                .secrets
+                .lock()
+                .map(|cache| Arc::clone(&cache.values))
+                .map_err(|_| "Secret cache unavailable".into()),
+        }
     }
 
     pub fn load(registry: Registry) -> Result<Self, String> {
         let max_commands = limits::configured("LARP_MAX_COMMANDS", 32, 1024)?;
         let path = runtime_path()?;
-        let mut values = BTreeMap::new();
-        for (project, item) in &registry.projects {
-            for (name, reference) in &item.secrets {
-                let value = secrets::read(reference).map_err(|_| {
-                    format!("Could not load secret {project}/{name} from 1Password")
-                })?;
-                values.insert((project.clone(), name.clone()), value);
-            }
+        let references = references(&registry);
+        let mut values = SecretValues::new();
+        for ((project, name), reference) in &references {
+            let value = secrets::read(reference)
+                .map_err(|_| format!("Could not load secret {project}/{name} from 1Password"))?;
+            values.insert((project.clone(), name.clone()), Arc::new(value));
         }
+        let values = Arc::new(values);
         Ok(Self {
             registry,
-            values: Arc::new(values),
+            values: None,
+            secrets: Arc::new(Mutex::new(SecretCache { references, values })),
             commands: Counter::new(max_commands),
             path: Arc::new(path),
         })
     }
 
     pub fn with_registry(&self, registry: Registry) -> Result<Self, String> {
-        for (project, item) in &registry.projects {
-            for (name, reference) in &item.secrets {
-                if self
-                    .registry
-                    .projects
-                    .get(project)
-                    .and_then(|old| old.secrets.get(name))
-                    != Some(reference)
-                {
-                    return Err(
-                        "secret references changed; restart 'larp start' to load them".into(),
-                    );
-                }
+        self.with_registry_using(registry, secrets::read)
+    }
+
+    fn with_registry_using(
+        &self,
+        registry: Registry,
+        mut read: impl FnMut(&str) -> Result<Zeroizing<String>, String>,
+    ) -> Result<Self, String> {
+        let desired = references(&registry);
+        let mut cache = self
+            .secrets
+            .lock()
+            .map_err(|_| "Secret cache unavailable")?;
+        if cache.references != desired {
+            let mut values = SecretValues::new();
+            for (key, reference) in &desired {
+                let value = if cache.references.get(key) == Some(reference) {
+                    Arc::clone(
+                        cache
+                            .values
+                            .get(key)
+                            .ok_or("Registered secret was not loaded")?,
+                    )
+                } else {
+                    Arc::new(read(reference).map_err(|_| {
+                        format!("Could not load secret {}/{} from 1Password", key.0, key.1)
+                    })?)
+                };
+                values.insert(key.clone(), value);
             }
+            cache.values = Arc::new(values);
+            cache.references = desired;
         }
         Ok(Self {
             registry,
-            values: Arc::clone(&self.values),
+            values: Some(Arc::clone(&cache.values)),
+            secrets: Arc::clone(&self.secrets),
             commands: Arc::clone(&self.commands),
             path: Arc::clone(&self.path),
         })
@@ -150,6 +204,7 @@ impl Runner {
         cwd: &str,
         env: Option<&str>,
     ) -> Result<RunResult, String> {
+        let values = self.values()?;
         let project_item = self
             .registry
             .projects
@@ -173,8 +228,7 @@ impl Runner {
                     })
                     .map(|(name, _)| name)
                     .ok_or("reference file includes an unregistered or ungranted secret")?;
-                let value = self
-                    .values
+                let value = values
                     .get(&(project.to_owned(), secret_name.to_owned()))
                     .ok_or("registered secret was not loaded")?;
                 injected.push((variable.as_str(), value.as_str()));
@@ -204,7 +258,7 @@ impl Runner {
                 }
             });
         }
-        let redactor = Redactor::new(self.values.values().map(|value| value.as_str()));
+        let redactor = Redactor::new(values.values().map(|value| value.as_str()));
         let capture_limit = OUTPUT_LIMIT + redactor.max_pattern_len();
         let mut child = child_command
             .spawn()
@@ -442,12 +496,12 @@ fn truncate_utf8(value: &mut String, limit: usize) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{capture_process, resolve_executable, Counter, Runner};
+    use super::{capture_process, references, resolve_executable, Counter, Runner, SecretCache};
     use crate::registry::{Client, ClientIdentity, Project, RegisteredCommand, Registry};
     use rand_core::{OsRng, RngCore};
     use std::collections::{BTreeMap, BTreeSet};
     use std::process::{Command, Stdio};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use zeroize::Zeroizing;
 
@@ -467,8 +521,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn metadata_refresh_rejects_changed_secret_reference() {
+    fn changed_secret_reference_refreshes_once_and_drops_old_snapshot() {
         let runner = dummy();
+        let old_values = runner.values().unwrap();
+        let old_weak = Arc::downgrade(&old_values);
         let mut registry: Registry =
             serde_json::from_value(serde_json::to_value(&runner.registry).unwrap()).unwrap();
         registry
@@ -477,7 +533,53 @@ pub(crate) mod tests {
             .unwrap()
             .secrets
             .insert("api_key".into(), "op://other/item/field".into());
-        assert!(runner.with_registry(registry).is_err());
+        let refreshed = runner
+            .with_registry_using(registry, |_| Ok(Zeroizing::new("new-value".into())))
+            .unwrap();
+        assert_eq!(
+            old_values[&("demo".into(), "api_key".into())].as_str(),
+            "dummy-secret-value"
+        );
+        assert_eq!(
+            refreshed.values().unwrap()[&("demo".into(), "api_key".into())].as_str(),
+            "new-value"
+        );
+        let unchanged: Registry =
+            serde_json::from_value(serde_json::to_value(&refreshed.registry).unwrap()).unwrap();
+        refreshed
+            .with_registry_using(unchanged, |_| panic!("Unchanged reference was reloaded"))
+            .unwrap();
+        drop(old_values);
+        assert!(old_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn partial_secret_refresh_is_not_published() {
+        let runner = dummy();
+        let mut registry: Registry =
+            serde_json::from_value(serde_json::to_value(&runner.registry).unwrap()).unwrap();
+        let secrets = &mut registry.projects.get_mut("demo").unwrap().secrets;
+        secrets.insert("api_key".into(), "op://other/item/field".into());
+        secrets.insert("second".into(), "op://other/item/second".into());
+        let mut reads = 0;
+        assert!(runner
+            .with_registry_using(registry, |_| {
+                reads += 1;
+                if reads == 1 {
+                    Ok(Zeroizing::new("new-value".into()))
+                } else {
+                    Err("Unavailable".into())
+                }
+            })
+            .is_err());
+        assert_eq!(reads, 2);
+        let cache = runner.secrets.lock().unwrap();
+        assert_eq!(cache.references, references(&runner.registry));
+        assert_eq!(cache.values.len(), 1);
+        assert_eq!(
+            cache.values[&("demo".into(), "api_key".into())].as_str(),
+            "dummy-secret-value"
+        );
     }
 
     #[test]
@@ -607,12 +709,17 @@ pub(crate) mod tests {
                 exec: BTreeSet::new(),
             },
         );
+        let values = Arc::new(BTreeMap::from([(
+            ("demo".into(), "api_key".into()),
+            Arc::new(Zeroizing::new("dummy-secret-value".into())),
+        )]));
         Runner {
+            secrets: Arc::new(Mutex::new(SecretCache {
+                references: references(&registry),
+                values,
+            })),
             registry,
-            values: Arc::new(BTreeMap::from([(
-                ("demo".into(), "api_key".into()),
-                Zeroizing::new("dummy-secret-value".into()),
-            )])),
+            values: None,
             commands: Counter::new(32),
             path: Arc::new(super::runtime_path().unwrap()),
         }

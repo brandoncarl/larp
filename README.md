@@ -4,6 +4,8 @@ LARP is a local Rust action runner for commands that need 1Password secrets. An 
 
 For a short setup walkthrough, see [QUICKSTART.md](QUICKSTART.md).
 
+The [Homebrew tap release guide](packaging/homebrew/README.md) covers the planned `brandoncarl/tap/larp` formula.
+
 ## Start
 
 ```sh
@@ -38,7 +40,9 @@ command = "/usr/local/bin/larp"
 args = ["mcp"]
 ```
 
-The server and bridge must run the same LARP version. Start the server from a shell whose `PATH` includes the tools your commands need; restart it after changing that `PATH`. Permission, command, and project changes take effect on the next MCP call. Client registration changes take effect on the next connection; reconnect the MCP client after a client change. Restart `larp start` after changing secret references. `start` does not ask for the LARP admin password. The bridge opens a fresh local connection for each request, so restarting `larp start` does not leave an existing MCP chat attached to a dead socket. A call made while the server is unavailable returns a retryable error. LARP never automatically retries a command whose outcome is unknown.
+Windsurf Cascade uses a JSON `mcpServers` entry instead. See the [Cascade example in the quick start](QUICKSTART.md) and keep `larp start` running separately.
+
+The server and bridge must run the same LARP version. Start the server from a shell whose `PATH` includes the tools your commands need; restart it after changing that `PATH`. Permission, command, project, and secret registration changes take effect on the next MCP call. LARP loads only new or changed secret references from 1Password and updates its in-memory set after every read succeeds. A failed read leaves the prior set intact and returns an error you can retry. Client registration changes take effect on the next connection; reconnect the MCP client after a client change. `start` does not ask for the LARP admin password. The bridge opens a fresh local connection for each request, so restarting `larp start` does not leave an existing MCP chat attached to a dead socket. A call made while the server is unavailable returns a retryable error. LARP never automatically retries a command whose outcome is unknown.
 
 ## Use a reference file
 
@@ -55,9 +59,9 @@ Register all its references in one step from the admin console:
 larp> secret import demo .env.op
 ```
 
-For a relative path, LARP resolves it from the admin console's current directory and shows the absolute directory and file for confirmation before reading. Absolute paths also work. LARP validates the whole file before changing its registry. It skips identical registrations. For each name whose registered reference differs, choose **Yes** to overwrite it, **No** to keep it, or **Abort** to save nothing from the import. A non-interactive import with conflicts fails without changes. The import does not grant any client access; use `permission add <client> secret <project> <name>` for each secret the client may receive. **Existing grants by name continue to apply after an overwrite**, so review the new reference before choosing Yes. Restart `larp start` after adding or replacing registered references.
+For a relative path, LARP resolves it from the admin console's current directory and shows the absolute directory and file for confirmation before reading. Absolute paths also work. LARP validates the whole file before changing its registry. It skips identical registrations. For each name whose registered reference differs, choose **Yes** to overwrite it, **No** to keep it, or **Abort** to save nothing from the import. A non-interactive import with conflicts fails without changes. The import does not grant any client access; use `permission add <client> secret <project> <name>` for each secret the client may receive. **Existing grants by name continue to apply after an overwrite**, so review the new reference before choosing Yes. LARP loads added or replaced references on the next MCP call.
 
-The file is read for each MCP call. LARP uses its variable names, matches each `op://` reference to a secret registered under that project, checks the calling client's secret grant, and injects the value already held in memory. It rejects the whole call if any reference is unregistered or ungranted. Changing the file needs no restart when all its references are already registered and loaded. Registering a new reference or picking up a changed value in 1Password requires restarting `larp start`.
+The file is read for each MCP call. LARP uses its variable names, matches each `op://` reference to a secret registered under that project, checks the calling client's secret grant, and injects the value already held in memory. It rejects the whole call if any reference is unregistered or ungranted. Changing the file needs no restart when all its references are already registered and loaded. Registering a new reference loads it on the next MCP call. To pick up a changed value at an unchanged reference, restart `larp start`.
 
 The `env` parameter is an **absolute path** to a regular reference-only file. It is optional; without it, LARP injects no secrets. The file is limited to 1 MiB and 256 variables. Plaintext values, duplicate names, and reserved execution variables such as `PATH` are rejected. LARP does not save the file path or resolved values in its registry.
 
@@ -94,6 +98,7 @@ An `exec` grant plus a secret grant permits arbitrary code to use that secret. G
 ```text
 client add [name process-path]       client remove <name>       client list
 project add <name> [--cwd <path>]    project cwd <name> <path>
+project rename <old> <new>
 project remove <name>                project list
 command add <project> <name> <command> [--cwd <path>]
 command update <project> <name> <command> [--cwd <path>]

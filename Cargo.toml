@@ -3,6 +3,8 @@ name = "larp"
 version = "0.1.0"
 edition = "2021"
 description = "Minimal local 1Password action runner"
+license = "MIT"
+repository = "https://github.com/brandoncarl/larp"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

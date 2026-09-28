@@ -54,6 +54,7 @@ client                                                      MCP callers
 project                                                     Commands and secrets
   add <name> [--cwd <path>]                                 Create a project
   cwd <name> <path>                                         Set the working directory
+  rename <old> <new>                                        Rename a project and its grants
   remove <name>                                             Remove a project and its grants
   list                                                      Show projects
 
@@ -92,6 +93,7 @@ Option+Left/Right moves by word; Up/Down browses history."#,
         Some("project") => r#"Group commands and secret references.
   project add <name> [--cwd <absolute-directory>]
   project cwd <name> <absolute-directory>
+  project rename <old> <new>
   project list
   project remove <name>"#,
         Some("command") => r#"Save a command and its working directory.
@@ -169,6 +171,7 @@ pub(crate) fn print_action(topic: &str, action: &str) -> Result<(), String> {
         ("client", "list") => "client list\nShow registered clients and their process paths.",
         ("project", "add") => "project add <name> [--cwd <absolute-directory>]\nCreate a project. Without --cwd, use the current directory.",
         ("project", "cwd") => "project cwd <name> <absolute-directory>\nSet the fixed working directory used by MCP exec.",
+        ("project", "rename") => "project rename <old> <new>\nRename a project, keeping its commands, secrets, and client grants.",
         ("project", "remove") => "project remove <name>\nRemove the project and its client grants.",
         ("project", "list") => "project list\nShow projects and their exec working directories.",
         ("command", "add") => "command add <project> <name> \"<command and arguments>\" [--cwd <directory>]\nSave a command. Relative --cwd paths are confirmed and saved as absolute paths.",

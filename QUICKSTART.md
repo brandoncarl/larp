@@ -29,15 +29,32 @@ Build with `sh scripts/build-release.sh` from the LARP source directory. It remo
 
    At the `client add` prompts, enter `codex` and the absolute path to Codex's executable. For an import from a relative path, confirm the absolute file path LARP displays. Importing secrets does not grant access; the `permission` lines do.
 
+   If you do not know the client's executable path, start LARP and connect the client once. The `larp start` terminal shows the path for an unregistered caller and a `client add` command to copy into the admin console. The MCP caller sees only an authorization error.
+
 5. **Connect to secrets.** Run `larp start` in a terminal. Approve the 1Password CLI request and wait for **LARP ready**. Keep this terminal open. LARP loads the registered values into memory; an unreadable reference stops startup and names the project and secret that need attention.
 
-6. **Connect the MCP client.** Configure your client to launch the absolute path to `larp mcp`; for Codex:
+6. **Connect the MCP client.** Configure your client to launch the absolute path to `larp mcp`. For Codex:
 
    ```toml
    [mcp_servers.larp]
    command = "/absolute/path/to/larp"
    args = ["mcp"]
    ```
+
+   For Windsurf Cascade, put this entry in `~/.config/devin/mcp_config.json` (the file shown in Cascade's MCP settings):
+
+   ```json
+   {
+     "mcpServers": {
+       "larp": {
+         "command": "/usr/local/bin/larp",
+         "args": ["mcp"]
+       }
+     }
+   }
+   ```
+
+   Replace `/usr/local/bin/larp` with your installed LARP path if different. Keep any other entries already in `mcpServers`. Start `larp start` separately, then connect Cascade. If Cascade is not registered, the `larp start` terminal shows its executable path; add it as a client and grant it the project permissions it needs.
 
 7. **Test without exposing values.** Ask the client to call `commands(project="demo")`, then `command(project="demo", name="check", env="/absolute/path/to/project/.env.op")`. The `env` path must be absolute. LARP injects only registered references granted to that client and returns redacted command output. Without `env`, it injects no secrets. Replace `pwd` with a useful project command once the connection works.
 

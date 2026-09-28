@@ -202,15 +202,20 @@ fn serve_connection(stream: UnixStream, runner: &Runner, audit: &Audit) -> Resul
         Err(_) => {
             let mut stream = stream;
             let _ = stream.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"error\":{\"code\":-32004,\"message\":\"LARP client not authorized\"}}\n");
+            if let Some(path) = identity::unregistered_process(bridge_pid, uid, &current_registry) {
+                return Err(format!(
+                    "Unregistered client executable: {path:?}. Add it with `client add <name> {path:?}` in `larp admin`"
+                ));
+            }
             return Err("Client not authorized".into());
         }
     };
     let current_runner = match runner.with_registry(current_registry) {
         Ok(current) => current,
-        Err(_) => {
+        Err(error) => {
             let mut stream = stream;
-            let _ = stream.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"error\":{\"code\":-32005,\"message\":\"Secret registrations changed; restart LARP\"}}\n");
-            return Err("Secret registrations changed; restart LARP".into());
+            let _ = stream.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"error\":{\"code\":-32005,\"message\":\"Could not refresh registered secrets; check LARP and retry\"}}\n");
+            return Err(error);
         }
     };
     registry_mcp::serve_live(
@@ -422,7 +427,7 @@ fn bridge_request(
     let preface: &[u8] = if initialize {
         b"{}\n"
     } else {
-        b"{}\n{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"larp-bridge\",\"version\":\"1\"}}\n"
+        b"{}\n{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"larp-bridge\",\"version\":\"1\"}}}\n"
     };
     socket.write_all(preface).map_err(|_| BridgeError {
         message: "LARP connection closed before the request",
@@ -457,8 +462,8 @@ fn bridge_request(
         }
         if handshake_error == Some(-32005) {
             return Err(BridgeError {
-                message: "Secret registrations changed; restart LARP",
-                retryable: false,
+                message: "Could not refresh registered secrets; check LARP and retry",
+                retryable: true,
             });
         }
         if handshake_error.is_some() {
@@ -682,6 +687,50 @@ mod tests {
             "LARP client not authorized; check its registration"
         );
         assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn bridge_sends_valid_initialize_before_tool_request() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let server_task = thread::spawn(move || {
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).unwrap();
+            assert_eq!(line, b"{}\n");
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).unwrap();
+            let initialize: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(initialize["method"], "initialize");
+            assert_eq!(initialize["params"]["clientInfo"]["name"], "larp-bridge");
+            server
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}\n")
+                .unwrap();
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).unwrap();
+            let initialized: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(initialized["method"], "notifications/initialized");
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(request["method"], "tools/call");
+            server
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n")
+                .unwrap();
+        });
+        let socket = Mutex::new(Some(client));
+        let response = bridge_request(
+            &|| Ok(socket.lock().unwrap().take().unwrap()),
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}\n",
+            false,
+        )
+        .unwrap();
+        server_task.join().unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["id"], 1);
+        assert!(response["result"].is_object());
     }
 
     #[test]
