@@ -10,6 +10,9 @@ builder_home=${HOME:?HOME must be set}
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 separator=$(printf '\037')
 privacy_flags="--remap-path-prefix=${builder_home}=/build${separator}--remap-path-prefix=${source_dir}=/src"
+if [ -n "${CARGO_HOME:-}" ]; then
+    privacy_flags="${privacy_flags}${separator}--remap-path-prefix=${CARGO_HOME}=/cargo"
+fi
 if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
     export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${separator}${privacy_flags}"
 else
