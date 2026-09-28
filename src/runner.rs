@@ -110,6 +110,16 @@ impl Runner {
             .lock()
             .map_err(|_| "Secret cache unavailable")?;
         if cache.references != desired {
+            let by_reference: BTreeMap<&str, Arc<Zeroizing<String>>> = cache
+                .references
+                .iter()
+                .filter_map(|(key, reference)| {
+                    cache
+                        .values
+                        .get(key)
+                        .map(|value| (reference.as_str(), Arc::clone(value)))
+                })
+                .collect();
             let mut values = SecretValues::new();
             for (key, reference) in &desired {
                 let value = if cache.references.get(key) == Some(reference) {
@@ -119,6 +129,8 @@ impl Runner {
                             .get(key)
                             .ok_or("Registered secret was not loaded")?,
                     )
+                } else if let Some(value) = by_reference.get(reference.as_str()) {
+                    Arc::clone(value)
                 } else {
                     Arc::new(read(reference).map_err(|_| {
                         format!("Could not load secret {}/{} from 1Password", key.0, key.1)
@@ -551,6 +563,25 @@ pub(crate) mod tests {
             .unwrap();
         drop(old_values);
         assert!(old_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn project_rename_reuses_loaded_reference() {
+        let runner = dummy();
+        let mut registry: Registry =
+            serde_json::from_value(serde_json::to_value(&runner.registry).unwrap()).unwrap();
+        registry.rename_project("demo", "renamed").unwrap();
+        let refreshed = runner
+            .with_registry_using(registry, |_| panic!("Renaming should not reread 1Password"))
+            .unwrap();
+        assert_eq!(
+            refreshed.values().unwrap()[&("renamed".into(), "api_key".into())].as_str(),
+            "dummy-secret-value"
+        );
+        let client = &refreshed.registry.clients["test"];
+        assert!(client
+            .secrets
+            .contains(&("renamed".into(), "api_key".into())));
     }
 
     #[test]
