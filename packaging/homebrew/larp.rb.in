@@ -18,6 +18,13 @@ class Larp < Formula
     doc.install "README.md", "QUICKSTART.md", "LICENSE"
   end
 
+  def caveats
+    <<~EOS
+      Install the 1Password CLI and enable 1Password MCP before running LARP.
+      Run `larp admin` to configure it, then `larp start` in a separate terminal.
+    EOS
+  end
+
   test do
     assert_match "larp admin", shell_output("#{bin}/larp help")
   end

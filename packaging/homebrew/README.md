@@ -1,9 +1,14 @@
 # Homebrew tap release
 
-LARP's formula belongs in a separate `brandoncarl/homebrew-tap` repository as `Formula/larp.rb`. This directory holds its source template; the release archive checksum must come from the published tag.
+LARP's formula belongs in a separate public `brandoncarl/homebrew-tap` repository as `Formula/larp.rb`. Create and clone that repository before preparing the formula. This directory holds its source template; the release archive checksum must come from the published tag.
 
-1. Commit and push a release whose `Cargo.toml` version is `0.1.0`, then create and push tag `v0.1.0`. Do not move the tag after publishing the formula.
-2. Download `https://github.com/brandoncarl/larp/archive/refs/tags/v0.1.0.tar.gz` and calculate its SHA-256 with `shasum -a 256`.
+1. Push the release commit on `main`, then create and push tag `v0.1.0` for the `0.1.0` version in `Cargo.toml`. Do not move the tag after publishing the formula.
+2. Download the published source archive and calculate its SHA-256:
+
+   ```sh
+   curl -fL -o larp-v0.1.0.tar.gz https://github.com/brandoncarl/larp/archive/refs/tags/v0.1.0.tar.gz
+   shasum -a 256 larp-v0.1.0.tar.gz
+   ```
 3. From this repository, render the formula into the tap checkout:
 
    ```sh
