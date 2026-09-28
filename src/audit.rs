@@ -13,6 +13,7 @@ const MAX_FILES: usize = 5;
 #[serde(rename_all = "camelCase")]
 pub struct Event<'a> {
     pub time_ms: u128,
+    pub request_id: Option<String>,
     pub client: &'a str,
     pub identity: &'a str,
     pub project: Option<&'a str>,
@@ -38,6 +39,7 @@ impl<'a> Event<'a> {
             .as_millis();
         Self {
             time_ms,
+            request_id: None,
             client,
             identity,
             project,

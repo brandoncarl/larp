@@ -461,6 +461,12 @@ fn bridge_request(
                 retryable: false,
             });
         }
+        if handshake_error.is_some() {
+            return Err(BridgeError {
+                message: "LARP rejected MCP initialization; check the server log",
+                retryable: false,
+            });
+        }
         socket
             .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
             .map_err(|_| BridgeError {
@@ -484,6 +490,18 @@ fn bridge_request(
             message: "LARP connection closed during the request; outcome unknown",
             retryable: false,
         });
+    }
+    if let (Ok(mut reply), Ok(original)) = (
+        serde_json::from_slice::<Value>(&response),
+        serde_json::from_slice::<Value>(request),
+    ) {
+        if reply.get("id").is_some_and(Value::is_null) && reply.get("error").is_some() {
+            reply["id"] = original["id"].clone();
+            if let Ok(mut corrected) = serde_json::to_vec(&reply) {
+                corrected.push(b'\n');
+                return Ok(corrected);
+            }
+        }
     }
     Ok(response)
 }
@@ -729,6 +747,41 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&response).unwrap()["id"],
             7
         );
+    }
+
+    #[test]
+    fn bridge_preserves_client_id_on_server_parse_error() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let server_task = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap(); // bridge preface
+            line.clear();
+            reader.read_line(&mut line).unwrap(); // internal initialize
+            reader
+                .get_mut()
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}\n")
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap(); // initialized notification
+            line.clear();
+            reader.read_line(&mut line).unwrap(); // original request
+            reader
+                .get_mut()
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Invalid MCP JSON\",\"data\":{\"requestId\":\"0123456789abcdef\"}}}\n")
+                .unwrap();
+        });
+        let socket = Mutex::new(Some(client));
+        let response = bridge_request(
+            &|| Ok(socket.lock().unwrap().take().unwrap()),
+            b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\"}\n",
+            false,
+        )
+        .unwrap();
+        server_task.join().unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["id"], 42);
+        assert_eq!(response["error"]["data"]["requestId"], "0123456789abcdef");
     }
 
     #[test]

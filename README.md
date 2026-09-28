@@ -124,6 +124,6 @@ The private socket is `/private/tmp/larp-<user ID>/mcp.sock`. LARP checks its pe
 
 The `larp start` terminal shows short, readable client and command activity. It does not print process paths, PIDs, command arguments, environment values, or secret references. The private rotating audit file remains JSON Lines for structured review and records decisions without command output or secret values.
 
-Audit records go to private `~/.config/larp/audit.jsonl`, rotate at 10 MiB, and retain five files. They include client, project, tool, permission decision, duration, exit status, timeout, and resolved executable, but never arguments, file contents, references, environment values, or command output. Defaults are 32 concurrent commands and 128 MCP connections; `LARP_MAX_COMMANDS` and `LARP_MAX_CONNECTIONS` configure them on the server process.
+Audit records go to private `~/.config/larp/audit.jsonl`, rotate at 10 MiB, and retain five files. They include a LARP-generated `requestId`, client, project, tool, permission decision, duration, exit status, timeout, and resolved executable. The same `requestId` appears in tool results and malformed or oversized request errors, so those calls can be matched to their audit records. LARP does not log the client-supplied JSON-RPC ID, arguments, file contents, references, environment values, or command output. Defaults are 32 concurrent commands and 128 MCP connections; `LARP_MAX_COMMANDS` and `LARP_MAX_CONNECTIONS` configure them on the server process.
 
 `larp auth` checks 1Password approval without printing secret values.

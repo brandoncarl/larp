@@ -4,11 +4,68 @@ use crate::{
     registry::Registry,
     runner::Runner,
 };
+use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Write};
 use std::time::Instant;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
+
+fn request_id() -> String {
+    format!("{:016x}", OsRng.next_u64())
+}
+
+enum ProtocolFailure {
+    Oversized,
+    Incomplete,
+    MalformedJson { column: usize },
+}
+
+impl ProtocolFailure {
+    fn details(&self) -> (&'static str, String, i32) {
+        match self {
+            Self::Oversized => (
+                "oversized_request",
+                "MCP request exceeded 64 KiB".into(),
+                -32600,
+            ),
+            Self::Incomplete => (
+                "incomplete_request",
+                "MCP request ended before the newline".into(),
+                -32600,
+            ),
+            Self::MalformedJson { column } => (
+                "malformed_json",
+                format!("Invalid MCP JSON at column {column}"),
+                -32700,
+            ),
+        }
+    }
+}
+
+fn protocol_failure(
+    output: &mut impl Write,
+    audit: Option<&Audit>,
+    client_name: &str,
+    identity: &str,
+    request_id: &str,
+    failure: ProtocolFailure,
+) -> Result<(), String> {
+    let (decision, message, code) = failure.details();
+    if let Some(audit) = audit {
+        let mut event = Event::now(client_name, identity, None, "mcp", decision);
+        event.request_id = Some(request_id.to_owned());
+        audit.record(&event)?;
+        crate::ui::error(&format!("{message} · request {request_id}"));
+    }
+    respond(
+        output,
+        &json!({
+            "jsonrpc":"2.0", "id":null,
+            "error":{"code":code,"message":message,"data":{"requestId":request_id}}
+        }),
+    )
+}
 
 pub fn initialization(id: &Value) -> Value {
     json!({"jsonrpc":"2.0", "id":id,
@@ -88,6 +145,7 @@ fn serve_inner<R: BufRead, W: Write>(
     let mut initialized = false;
     let mut initialize_seen = false;
     loop {
+        let request_id = request_id();
         let mut line = Vec::new();
         input
             .by_ref()
@@ -97,10 +155,44 @@ fn serve_inner<R: BufRead, W: Write>(
         if line.is_empty() {
             return Ok(());
         }
-        if line.len() > MAX_REQUEST_BYTES || !line.ends_with(b"\n") {
-            return Err("MCP request exceeded size limit".into());
+        if line.len() > MAX_REQUEST_BYTES {
+            protocol_failure(
+                &mut output,
+                audit,
+                client_name,
+                identity,
+                &request_id,
+                ProtocolFailure::Oversized,
+            )?;
+            return Ok(());
         }
-        let request: Value = serde_json::from_slice(&line).map_err(|_| "invalid MCP request")?;
+        if !line.ends_with(b"\n") {
+            protocol_failure(
+                &mut output,
+                audit,
+                client_name,
+                identity,
+                &request_id,
+                ProtocolFailure::Incomplete,
+            )?;
+            return Ok(());
+        }
+        let request: Value = match serde_json::from_slice(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                protocol_failure(
+                    &mut output,
+                    audit,
+                    client_name,
+                    identity,
+                    &request_id,
+                    ProtocolFailure::MalformedJson {
+                        column: error.column(),
+                    },
+                )?;
+                continue;
+            }
+        };
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         let Some(id) = request.get("id") else {
             if method == "notifications/initialized" && initialize_seen {
@@ -200,11 +292,30 @@ fn serve_inner<R: BufRead, W: Write>(
                     } else {
                         serde_json::to_string(&projects).unwrap_or_default()
                     };
+                    if let Some(audit) = audit {
+                        let mut event = Event::now(
+                            client_name,
+                            identity,
+                            project_filter,
+                            "commands",
+                            "allowed",
+                        );
+                        event.request_id = Some(request_id.clone());
+                        if audit.record(&event).is_err() {
+                            error(
+                                &mut output,
+                                id,
+                                -32002,
+                                "Audit unavailable; catalog withheld",
+                            )?;
+                            continue;
+                        }
+                    }
                     respond(
                         &mut output,
                         &json!({"jsonrpc":"2.0","id":id,"result":{
                             "content":[{"type":"text","text":summary}],
-                            "structuredContent":{"projects":projects}
+                            "structuredContent":{"projects":projects,"requestId":request_id}
                         }}),
                     )?;
                     continue;
@@ -254,6 +365,8 @@ fn serve_inner<R: BufRead, W: Write>(
                             tool.unwrap(),
                             "attempt",
                         );
+                        let mut attempt = attempt;
+                        attempt.request_id = Some(request_id.clone());
                         if audit.record(&attempt).is_err() {
                             error(
                                 &mut output,
@@ -297,6 +410,7 @@ fn serve_inner<R: BufRead, W: Write>(
                             tool.unwrap(),
                             decision,
                         );
+                        event.request_id = Some(request_id.clone());
                         event.duration_ms = started.elapsed().as_millis();
                         if let Ok(outcome) = &result {
                             event.exit_code = outcome.status;
@@ -337,12 +451,12 @@ fn serve_inner<R: BufRead, W: Write>(
                     let response = match result {
                         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":{
                             "content":[{"type":"text","text":format!("exit status: {:?}\nstdout:\n{}\nstderr:\n{}",result.status,result.stdout,result.stderr)}],
-                            "structuredContent":{"exitCode":result.status,"stdout":result.stdout,"stderr":result.stderr,"truncated":result.truncated,"timedOut":result.timed_out},
+                            "structuredContent":{"requestId":request_id,"exitCode":result.status,"stdout":result.stdout,"stderr":result.stderr,"truncated":result.truncated,"timedOut":result.timed_out},
                             "isError":result.timed_out || result.status != Some(0)
                         }}),
                         Err(message) => json!({"jsonrpc":"2.0","id":id,"result":{
                             "content":[{"type":"text","text":crate::ui::error_text(&message)}],
-                            "structuredContent":{"retryable":message == limits::BUSY},
+                            "structuredContent":{"requestId":request_id,"retryable":message == limits::BUSY},
                             "isError":true
                         }}),
                     };
@@ -483,6 +597,13 @@ mod tests {
             .map(|line| serde_json::from_slice(line).unwrap())
             .collect();
         let project = &responses[1]["result"]["structuredContent"]["projects"][0];
+        assert_eq!(
+            responses[1]["result"]["structuredContent"]["requestId"]
+                .as_str()
+                .unwrap()
+                .len(),
+            16
+        );
         assert_eq!(project["project"], "demo");
         assert_eq!(project["commands"], json!(["inspect"]));
         assert_eq!(project["secrets"], json!(["api_key"]));
@@ -662,7 +783,7 @@ mod tests {
         let input = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec","arguments":{"project":"demo","argv":["/bin/echo","sensitive-argument"]}}}),
+            json!({"jsonrpc":"2.0","id":"sensitive-request-id","method":"tools/call","params":{"name":"exec","arguments":{"project":"demo","argv":["/bin/echo","sensitive-argument"]}}}),
             json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"command","arguments":{"project":"demo","name":"inspect"}}}),
         ]
         .iter()
@@ -684,24 +805,74 @@ mod tests {
         assert!(records.contains("\"decision\":\"denied\""));
         assert!(records.contains("\"decision\":\"allowed\""));
         assert!(records.contains("\"exitCode\":0"));
+        assert!(records.lines().all(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["requestId"]
+                .as_str()
+                .is_some_and(|id| id.len() == 16 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+        }));
         assert!(!records.contains("dummy-secret-value"));
         assert!(!records.contains("sensitive-argument"));
+        assert!(!records.contains("sensitive-request-id"));
         assert!(!records.contains("op://"));
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn malformed_request_does_not_start_command() {
+        let directory = std::env::temp_dir().join(format!(
+            "larp-mcp-invalid-{}-{}",
+            std::process::id(),
+            OsRng.next_u64()
+        ));
+        DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        let audit = Audit::in_dir(directory.clone(), 10 * 1024);
         let mut output = Vec::new();
-        let result = serve(
+        serve(
             Cursor::new(b"{invalid}\n"),
+            &mut output,
+            &dummy(),
+            "test",
+            Some(&audit),
+            "path-only",
+        )
+        .unwrap();
+        let response: Value = serde_json::from_slice(&output[..output.len() - 1]).unwrap();
+        assert_eq!(response["error"]["code"], -32700);
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Invalid MCP JSON at column "));
+        let request_id = response["error"]["data"]["requestId"].as_str().unwrap();
+        assert_eq!(request_id.len(), 16);
+        let record: Value = serde_json::from_str(
+            fs::read_to_string(directory.join("audit.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(record["requestId"], request_id);
+        assert_eq!(record["decision"], "malformed_json");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn oversized_request_is_reported_once() {
+        let input = format!(
+            "{}\n{{invalid}}\n",
+            "x".repeat(super::MAX_REQUEST_BYTES + 1)
+        );
+        let mut output = Vec::new();
+        serve(
+            Cursor::new(input),
             &mut output,
             &dummy(),
             "test",
             None,
             "path-only",
-        );
-        assert!(result.is_err());
-        assert!(output.is_empty());
+        )
+        .unwrap();
+        assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+        let response: Value = serde_json::from_slice(&output[..output.len() - 1]).unwrap();
+        assert_eq!(response["error"]["message"], "MCP request exceeded 64 KiB");
     }
 }
