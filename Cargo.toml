@@ -1,0 +1,16 @@
+[package]
+name = "larp"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal local 1Password action runner"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1"
+libc = "0.2"
+shlex = "1"
+argon2 = "0.5.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rpassword = "7.5.4"
+base64 = "0.22"
