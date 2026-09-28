@@ -60,12 +60,71 @@ fn check_socket(path: &Path) -> Result<(), String> {
     }
 }
 
-struct SocketCleanup(PathBuf);
+fn prepare_socket_path(
+    path: &Path,
+    connect: impl FnOnce(&Path) -> io::Result<UnixStream>,
+) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            let uid = unsafe { libc::geteuid() };
+            if metadata.uid() != uid || metadata.permissions().mode() & 0o777 != 0o600 {
+                return Err("Existing LARP socket is not private to this user".into());
+            }
+            match connect(path) {
+                Ok(_) => Err("LARP is already running".into()),
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                    let current =
+                        fs::symlink_metadata(path).map_err(|_| "LARP socket changed; retry")?;
+                    if !current.file_type().is_socket()
+                        || current.dev() != metadata.dev()
+                        || current.ino() != metadata.ino()
+                    {
+                        return Err("LARP socket changed; retry".into());
+                    }
+                    fs::remove_file(path).map_err(|_| "Could not clear stale LARP socket".into())
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    Err("Cannot check existing LARP socket; access denied".into())
+                }
+                Err(_) => Err("Cannot check existing LARP socket; retry".into()),
+            }
+        }
+        Ok(_) => Err("Unexpected file at LARP socket path".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Could not inspect LARP socket path".into()),
+    }
+}
+
+struct SocketCleanup {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl SocketCleanup {
+    fn new(path: PathBuf) -> Result<Self, String> {
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "Could not inspect LARP socket")?;
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
 
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-        let _ = fs::remove_dir(runtime_dir());
+        if fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            metadata.file_type().is_socket()
+                && metadata.dev() == self.device
+                && metadata.ino() == self.inode
+        }) {
+            let _ = fs::remove_file(&self.path);
+            if let Some(directory) = self.path.parent() {
+                let _ = fs::remove_dir(directory);
+            }
+        }
     }
 }
 
@@ -74,19 +133,9 @@ pub fn start() -> Result<(), String> {
     let connections = Counter::new(max_connections);
     check_runtime_dir()?;
     let path = socket_path();
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            if UnixStream::connect(&path).is_ok() {
-                return Err("LARP is already running".into());
-            }
-            fs::remove_file(&path).map_err(|_| "could not clear stale LARP socket")?;
-        }
-        Ok(_) => return Err("unexpected file at LARP socket path".into()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err("could not inspect LARP socket path".into()),
-    }
+    prepare_socket_path(&path, |path| UnixStream::connect(path))?;
     let listener = UnixListener::bind(&path).map_err(|_| "could not bind LARP socket")?;
-    let _cleanup = SocketCleanup(path.clone());
+    let _cleanup = SocketCleanup::new(path.clone())?;
     fs::set_permissions(&path, Permissions::from_mode(0o600))
         .map_err(|_| "could not protect LARP socket")?;
     let registry = Registry::load()?;
@@ -441,9 +490,15 @@ fn bridge_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{bridge_io, bridge_request, read_bridge_preface};
+    use super::{
+        bridge_io, bridge_request, prepare_socket_path, read_bridge_preface, SocketCleanup,
+    };
+    use rand_core::RngCore;
+    use std::fs;
     use std::io::{BufRead, BufReader, Cursor, Write};
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -459,6 +514,82 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    fn socket_test_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "larp-socket-test-{}-{}",
+            std::process::id(),
+            rand_core::OsRng.next_u64()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    fn bind_socket_or_skip(path: &std::path::Path) -> Option<UnixListener> {
+        match UnixListener::bind(path) {
+            Ok(listener) => Some(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                fs::remove_dir(path.parent().unwrap()).unwrap();
+                None
+            }
+            Err(error) => panic!("Could not create test socket: {error}"),
+        }
+    }
+
+    #[test]
+    fn denied_probe_keeps_a_live_socket() {
+        let directory = socket_test_dir();
+        let path = directory.join("mcp.sock");
+        let Some(listener) = bind_socket_or_skip(&path) else {
+            return;
+        };
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = prepare_socket_path(&path, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(error, "Cannot check existing LARP socket; access denied");
+        assert!(path.exists());
+        assert_eq!(
+            prepare_socket_path(&path, |path| UnixStream::connect(path)).unwrap_err(),
+            "LARP is already running"
+        );
+        drop(listener);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn refused_probe_clears_only_a_stale_socket() {
+        let directory = socket_test_dir();
+        let path = directory.join("mcp.sock");
+        let Some(listener) = bind_socket_or_skip(&path) else {
+            return;
+        };
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        drop(listener);
+        prepare_socket_path(&path, |path| UnixStream::connect(path)).unwrap();
+        assert!(!path.exists());
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn old_server_cleanup_keeps_a_replacement_socket() {
+        let directory = socket_test_dir();
+        let path = directory.join("mcp.sock");
+        let Some(old_listener) = bind_socket_or_skip(&path) else {
+            return;
+        };
+        let cleanup = SocketCleanup::new(path.clone()).unwrap();
+        fs::remove_file(&path).unwrap();
+        let new_listener = UnixListener::bind(&path).unwrap();
+        drop(cleanup);
+        assert!(path.exists());
+        drop(new_listener);
+        drop(old_listener);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]
