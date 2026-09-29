@@ -37,6 +37,7 @@ jobs:
           cargo test --locked
           sh scripts/build-release.sh --locked --offline
           test "$(lipo -archs target/release/larp)" = '${{ matrix.arch }}'
+          codesign --force --sign - --timestamp=none target/release/larp
           codesign --verify --strict target/release/larp
           target/release/larp help | grep -F 'larp admin'
       - name: Package binary and documentation
