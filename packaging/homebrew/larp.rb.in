@@ -1,7 +1,6 @@
 class Larp < Formula
   desc "Local action runner with 1Password-backed secrets"
   homepage "https://github.com/brandoncarl/larp"
-  version "@VERSION@"
   license "MIT"
 
   depends_on :macos
