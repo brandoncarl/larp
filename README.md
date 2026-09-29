@@ -4,14 +4,12 @@ LARP is a local Rust action runner for commands that need 1Password secrets. An 
 
 For a short setup walkthrough, see [QUICKSTART.md](QUICKSTART.md).
 
-The [Homebrew tap release guide](packaging/homebrew/README.md) covers the planned `brandoncarl/tap/larp` formula.
+Install the macOS binary with `brew install brandoncarl/tap/larp`. Homebrew installs a prebuilt archive for Apple Silicon or Intel; users do not need Rust or LLVM. See the [Homebrew release guide](packaging/homebrew/README.md) for publishing.
 
 ## Start
 
 ```sh
-cd /path/to/larp
-sh scripts/build-release.sh
-./target/release/larp admin
+larp admin
 ```
 
 The first admin session sets a password of at least 12 characters. At the `larp>` prompt, short commands and pasted `larp ...` commands both work:
@@ -29,14 +27,14 @@ larp> exit
 Start the server in another terminal and approve 1Password access:
 
 ```sh
-./target/release/larp start
+larp start
 ```
 
-Configure Codex to launch the bridge, using the path where you installed LARP:
+Configure Codex to launch the bridge using the absolute path reported by `command -v larp`:
 
 ```toml
 [mcp_servers.larp]
-command = "/usr/local/bin/larp"
+command = "/absolute/path/to/larp"
 args = ["mcp"]
 ```
 

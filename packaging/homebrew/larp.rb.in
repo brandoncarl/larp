@@ -1,20 +1,25 @@
 class Larp < Formula
   desc "Local action runner with 1Password-backed secrets"
   homepage "https://github.com/brandoncarl/larp"
-  url "https://github.com/brandoncarl/larp/archive/refs/tags/v@VERSION@.tar.gz"
-  sha256 "@SHA256@"
+  version "@VERSION@"
   license "MIT"
 
-  depends_on "rust" => :build
   depends_on :macos
 
-  def fetch
-    system "cargo", "fetch", *std_cargo_fetch_args
+  on_macos do
+    on_arm do
+      url "https://github.com/brandoncarl/larp/releases/download/v@VERSION@/larp-v@VERSION@-darwin-arm64.tar.gz"
+      sha256 "@ARM_SHA256@"
+    end
+
+    on_intel do
+      url "https://github.com/brandoncarl/larp/releases/download/v@VERSION@/larp-v@VERSION@-darwin-x86_64.tar.gz"
+      sha256 "@INTEL_SHA256@"
+    end
   end
 
   def install
-    system "sh", "scripts/build-release.sh", "--locked", "--offline"
-    bin.install "target/release/larp"
+    bin.install "larp"
     doc.install "README.md", "QUICKSTART.md", "LICENSE"
   end
 

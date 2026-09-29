@@ -1,32 +1,17 @@
-# Homebrew tap release
+# Homebrew release
 
-LARP's formula belongs in the public [brandoncarl/homebrew-tap](https://github.com/brandoncarl/homebrew-tap) repository as `Formula/larp.rb`. Use a separate local checkout of that repository. This directory holds the formula template; its checksum must come from the published release archive.
+The public [brandoncarl/homebrew-tap](https://github.com/brandoncarl/homebrew-tap) installs prebuilt LARP archives. It does not build Rust code on the user's machine or install Rust or LLVM.
 
-1. Push the release commit on `main`, then create and push tag `v0.1.1` for the `0.1.1` version in `Cargo.toml`. Do not move the tag after publishing the formula.
-2. Download the published source archive and calculate its SHA-256:
-
-   ```sh
-   curl -fL -o larp-v0.1.1.tar.gz https://github.com/brandoncarl/larp/archive/refs/tags/v0.1.1.tar.gz
-   shasum -a 256 larp-v0.1.1.tar.gz
-   ```
-3. From this repository, set `TAP_DIR` to the absolute path of the tap checkout and render the formula:
+1. Commit and push the source release, then push the matching `v0.1.2` tag. The [release workflow](../../.github/workflows/release.yml) builds and tests native arm64 and Intel binaries on separate macOS runners and publishes both archives with `SHA256SUMS` on the GitHub Release. Do not move a published tag.
+2. Download both release archives and check their SHA-256 digests against the release's `SHA256SUMS`. Check that each archive contains `larp`, `README.md`, `QUICKSTART.md`, and `LICENSE`.
+3. From the LARP source checkout, render the formula into a separate local checkout of `brandoncarl/homebrew-tap`:
 
    ```sh
    TAP_DIR=/absolute/path/to/homebrew-tap
-   mkdir -p "$TAP_DIR/Formula"
-   sh scripts/render-homebrew-formula.sh 0.1.1 ACTUAL_SHA256 > "$TAP_DIR/Formula/larp.rb"
+   sh scripts/render-homebrew-formula.sh 0.1.2 ARM64_SHA256 INTEL_SHA256 > "$TAP_DIR/Formula/larp.rb"
    ```
 
-4. Tap the local checkout, audit the formula, and install it from source:
+4. Audit and test the formula. Install or upgrade it from the local tap checkout, then confirm `brew deps --include-build brandoncarl/tap/larp` has no dependencies. The formula must fetch the matching release archive and install its binary without running Cargo.
+5. Commit and push `Formula/larp.rb` in the tap. Users install with `brew install brandoncarl/tap/larp` and upgrade with `brew upgrade brandoncarl/tap/larp`.
 
-   ```sh
-   brew tap brandoncarl/tap "$TAP_DIR"
-   brew audit --new --formula brandoncarl/tap/larp
-   HOMEBREW_NO_INSTALL_FROM_API=1 brew install --build-from-source brandoncarl/tap/larp
-   larp help
-   ```
-
-   A pre-existing manual `larp` symlink in Homebrew's `bin` may conflict with linking; remove that symlink after checking where it points. Then commit and push `Formula/larp.rb` to `brandoncarl/homebrew-tap`.
-5. Users can install with `brew install brandoncarl/tap/larp`. The formula builds from the tagged source and installs only the executable and documentation. Users install the 1Password CLI and enable 1Password MCP separately.
-
-Homebrew does not create user configuration during installation. LARP creates `~/.config/larp/` when first used and checks that it is private to the current user. `larp start` creates its private runtime socket under `/private/tmp/larp-<uid>/`. Upgrading the Homebrew formula does not remove either directory. Restart the running LARP server and reconnect long-lived MCP bridges after an upgrade.
+The formula installs the executable and documentation only. Users install the 1Password CLI and enable 1Password MCP separately. Homebrew does not create user configuration during installation: LARP creates its private `~/.config/larp/` directory when first used. Restart a running LARP server and reconnect MCP clients after upgrading.

@@ -1,6 +1,6 @@
 # LARP quick start
 
-Build with `sh scripts/build-release.sh` from the LARP source directory. It removes builder-specific paths from the release binary.
+Install with `brew install brandoncarl/tap/larp`. Homebrew downloads a prebuilt macOS binary; Rust and LLVM are not needed on your machine.
 
 1. **Prepare 1Password.** Install and unlock the 1Password desktop app. In **Settings → Labs → MCP Server**, enable the local server; then open **Settings → Developer → Integrate with MCP clients**. Install the 1Password CLI too. Check that both `1password-mcp` and `op` are on your `PATH`, then run `larp auth`. LARP uses the MCP server for approval and `op read` to load vault references at startup. [1Password MCP setup](https://www.1password.dev/environments/mcp-server) · [1Password CLI](https://developer.1password.com/docs/cli/secrets-scripts)
 
