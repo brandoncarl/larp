@@ -1,6 +1,6 @@
 [package]
 name = "larp"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Minimal local 1Password action runner"
 license = "MIT"

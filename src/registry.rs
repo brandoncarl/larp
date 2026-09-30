@@ -39,7 +39,7 @@ pub struct Client {
     pub exec: BTreeSet<String>,
 }
 
-#[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientIdentity {
     Signed {
@@ -119,11 +119,52 @@ impl Registry {
     }
 
     pub fn client_for_process(&self, path: &str) -> Option<(&str, &Client)> {
-        self.clients
+        let mut matches = self
+            .clients
             .iter()
-            .find(|(_, client)| client.process == path)
-            .map(|(name, client)| (name.as_str(), client))
+            .filter(|(_, client)| process_matches(&client.process, path));
+        let (name, client) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some((name.as_str(), client))
     }
+}
+
+/// Only `*` is special; it never consumes a path separator.
+pub(crate) fn process_matches(pattern: &str, path: &str) -> bool {
+    let pattern: Vec<_> = pattern.split('/').collect();
+    let path: Vec<_> = path.split('/').collect();
+    pattern.len() == path.len()
+        && pattern
+            .iter()
+            .zip(path)
+            .all(|(pattern, value)| component_matches(pattern, value))
+}
+
+pub(crate) fn component_matches(pattern: &str, value: &str) -> bool {
+    let (pattern, value) = (pattern.as_bytes(), value.as_bytes());
+    let (mut p, mut v, mut star, mut retry) = (0, 0, None, 0);
+    while v < value.len() {
+        if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            retry = v;
+        } else if p < pattern.len() && pattern[p] == value[v] {
+            p += 1;
+            v += 1;
+        } else if let Some(index) = star {
+            retry += 1;
+            v = retry;
+            p = index + 1;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 fn rename_grants(grants: &mut BTreeSet<(String, String)>, old: &str, new: &str) {
@@ -178,6 +219,67 @@ pub fn env_name(value: &str) -> Result<(), String> {
 mod tests {
     use super::{Client, ClientIdentity, Project, RegisteredCommand, Registry};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn client_wildcards_are_confined_to_components() {
+        let pattern = "/releases/*/bin/codex";
+        assert!(super::process_matches(
+            pattern,
+            "/releases/0.159.2-arm64/bin/codex"
+        ));
+        assert!(super::process_matches(
+            pattern,
+            "/releases/backup/bin/codex"
+        ));
+        assert!(!super::process_matches(
+            pattern,
+            "/releases/other/version/bin/codex"
+        ));
+        assert!(!super::process_matches(
+            pattern,
+            "/releases/version/bin/other"
+        ));
+        assert!(super::process_matches(
+            "/releases/*-arm64/bin/codex",
+            "/releases/1.0-arm64/bin/codex"
+        ));
+        assert!(!super::process_matches(
+            "/releases/*-arm64/bin/codex",
+            "/releases/1.0-intel/bin/codex"
+        ));
+        assert!(super::component_matches("a*b*c", "axybzc"));
+        assert!(!super::component_matches("a*b*c", "axybz"));
+    }
+
+    #[test]
+    fn ambiguous_client_paths_are_not_authorized() {
+        let mut registry = Registry::default();
+        for (name, process) in [
+            ("wide", "/releases/*/bin/codex"),
+            ("narrow", "/releases/1.0/bin/codex"),
+        ] {
+            registry.clients.insert(
+                name.into(),
+                Client {
+                    process: process.into(),
+                    identity: ClientIdentity::PathOnly,
+                    commands: BTreeSet::new(),
+                    secrets: BTreeSet::new(),
+                    exec: BTreeSet::new(),
+                },
+            );
+        }
+        assert!(registry
+            .client_for_process("/releases/1.0/bin/codex")
+            .is_none());
+        assert_eq!(
+            registry
+                .client_for_process("/releases/2.0/bin/codex")
+                .unwrap()
+                .0,
+            "wide"
+        );
+    }
 
     #[test]
     fn legacy_environment_bindings_are_ignored_and_removed_on_save() {

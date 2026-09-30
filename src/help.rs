@@ -48,6 +48,7 @@ list                                                        Show clients and pro
 
 client                                                      MCP callers
   add [<name> <path>]                                       Register a client; prompts if omitted
+  update <name> [<path>]                                    Replace client path; keep grants
   remove <name>                                             Remove a client and its grants
   list                                                      Show clients
 
@@ -88,6 +89,8 @@ Option+Left/Right moves by word; Up/Down browses history."#,
         Some("client") => r#"Register the executable that calls LARP through MCP.
   client add <name> <absolute-process-path>
   client add                 Prompt for name and path
+  client update <name> [<absolute-process-path>]
+  Paths support * within a folder or filename; quote patterns in your shell.
   client list
   client remove <name>"#,
         Some("project") => r#"Group commands and secret references.
@@ -166,7 +169,8 @@ fn is_topic(value: &str) -> bool {
 
 pub(crate) fn print_action(topic: &str, action: &str) -> Result<(), String> {
     let usage = match (topic, action) {
-        ("client", "add") => "client add [<name> <absolute-process-path>]\nRegister an MCP client. With no arguments, LARP prompts for both fields.",
+        ("client", "add") => "client add [<name> <absolute-process-path>]\nRegister an MCP client. Paths support * within one component; quote patterns in your shell. At least one existing file must match. With no arguments, LARP prompts for both fields.",
+        ("client", "update") => "client update <name> [<absolute-process-path>]\nReplace a client path, preserving all grants. Retains its signing identity when the new path includes an existing signed client executable. Without a path, prompts for it. Paths support * within one component; quote patterns in your shell.",
         ("client", "remove") => "client remove <name>\nRemove a client and all its grants.",
         ("client", "list") => "client list\nShow registered clients and their process paths.",
         ("project", "add") => "project add <name> [--cwd <absolute-directory>]\nCreate a project. Without --cwd, use the current directory.",
@@ -217,6 +221,7 @@ mod tests {
         assert!(!cli.contains("larp config"));
         let admin = text(None, Context::Admin).unwrap();
         assert!(admin.contains("  add [<name> <path>]"));
+        assert!(admin.contains("  update <name> [<path>]"));
         assert!(admin.contains("exit"));
         assert!(!admin.contains("lock                                                        "));
         assert!(admin.contains("  change"));

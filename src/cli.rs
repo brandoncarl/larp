@@ -36,6 +36,15 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
             add_client(&mut registry, name, process)?;
             changed = true;
         }
+        ["client", "update", name] => {
+            let process = prompt("Absolute process path (supports *): ")?;
+            update_client(&mut registry, name, &process)?;
+            changed = true;
+        }
+        ["client", "update", name, process] => {
+            update_client(&mut registry, name, process)?;
+            changed = true;
+        }
         ["client", "remove", name] => {
             required_remove(registry.clients.remove(*name), "client")?;
             changed = true;
@@ -523,33 +532,147 @@ fn confirm_secret_overwrite(
 
 fn add_client(registry: &mut Registry, name: &str, process: &str) -> Result<(), String> {
     registry::name(name)?;
-    registry::absolute_path(process)?;
-    let canonical = std::fs::canonicalize(process).map_err(|_| "client process does not exist")?;
-    if !canonical.is_file() {
-        return Err("client process is not a file".into());
-    }
-    let canonical = canonical.to_string_lossy().into_owned();
-    if registry
-        .clients
-        .values()
-        .any(|client| client.process == canonical)
-    {
-        return Err("process is already registered".into());
-    }
     if registry.clients.contains_key(name) {
-        return Err("client already exists".into());
+        return Err("client already exists; use 'client update' to replace it".into());
     }
+    let (process, identity) = prepare_client(registry, name, process)?;
     registry.clients.insert(
         name.to_string(),
         Client {
-            identity: crate::identity::capture(&canonical)?,
-            process: canonical,
+            identity,
+            process,
             commands: BTreeSet::new(),
             secrets: BTreeSet::new(),
             exec: BTreeSet::new(),
         },
     );
     Ok(())
+}
+
+fn update_client(registry: &mut Registry, name: &str, process: &str) -> Result<(), String> {
+    if !registry.clients.contains_key(name) {
+        return Err("client does not exist".into());
+    }
+    let (process, identity) = prepare_client(registry, name, process)?;
+    let client = registry
+        .clients
+        .get_mut(name)
+        .expect("client checked above");
+    client.process = process;
+    client.identity = identity;
+    Ok(())
+}
+
+fn prepare_client(
+    registry: &Registry,
+    name: &str,
+    process: &str,
+) -> Result<(String, registry::ClientIdentity), String> {
+    registry::absolute_path(process)?;
+    let wildcard = process.contains('*');
+    if wildcard
+        && process[1..]
+            .split('/')
+            .any(|part| part == "." || part == ".." || part.is_empty())
+    {
+        return Err("wildcard path must not contain empty, . or .. components".into());
+    }
+    let mut candidates = vec![PathBuf::from("/")];
+    for component in process[1..].split('/') {
+        let mut next = Vec::new();
+        for parent in candidates {
+            if component.contains('*') {
+                let entries = match std::fs::read_dir(&parent) {
+                    Ok(entries) => entries,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        continue
+                    }
+                    Err(_) => return Err("could not read wildcard client directory".into()),
+                };
+                for entry in entries {
+                    let entry = entry.map_err(|_| "could not read wildcard client directory")?;
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|value| registry::component_matches(component, value))
+                    {
+                        next.push(entry.path());
+                    }
+                }
+            } else {
+                next.push(parent.join(component));
+            }
+        }
+        candidates = next;
+    }
+    // A path edit that includes the existing executable keeps its trusted
+    // identity. Running processes are still signature-checked on connection.
+    let retained_identity = registry
+        .clients
+        .get(name)
+        .filter(|client| {
+            matches!(client.identity, registry::ClientIdentity::Signed { .. })
+                && (client.process == process
+                    || candidates.iter().any(|candidate| {
+                        candidate
+                            .canonicalize()
+                            .ok()
+                            .and_then(|path| path.to_str().map(str::to_owned))
+                            .is_some_and(|path| registry::process_matches(&client.process, &path))
+                    }))
+        })
+        .map(|client| client.identity.clone());
+    let mut identity = None;
+    let mut stored = process.to_owned();
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|_| "could not resolve client process")?;
+        let canonical = canonical
+            .to_str()
+            .ok_or("client process path is not UTF-8")?;
+        if wildcard && !registry::process_matches(process, canonical) {
+            return Err("wildcard path must match the canonical executable path; use its resolved directory".into());
+        }
+        if registry.clients.iter().any(|(other, client)| {
+            other != name && registry::process_matches(&client.process, canonical)
+        }) {
+            return Err("process is already registered to another client".into());
+        }
+        let captured = if let Some(identity) = &retained_identity {
+            identity.clone()
+        } else {
+            crate::ui::note("Inspecting client signature; macOS verification may take a while...");
+            crate::identity::capture(canonical)?
+        };
+        if identity
+            .as_ref()
+            .is_some_and(|previous| previous != &captured)
+        {
+            return Err("matching client executables have different signing identities; use a narrower path".into());
+        }
+        identity = Some(captured);
+        if !wildcard {
+            stored = canonical.to_owned();
+        }
+    }
+    let identity = identity.ok_or("client path must match at least one existing file")?;
+    if registry
+        .clients
+        .iter()
+        .any(|(other, client)| other != name && client.process == stored)
+    {
+        return Err("process is already registered".into());
+    }
+    Ok((stored, identity))
 }
 
 fn canonical_cwd(path: &str) -> Result<String, String> {
@@ -596,6 +719,80 @@ mod tests {
     use super::{plan_secret_import, resolve_command_cwd, resolve_import_path, ImportDecision};
     use std::collections::BTreeMap;
     use std::path::Path;
+
+    #[test]
+    fn wildcard_client_update_preserves_grants_and_failure_is_atomic() {
+        let root = std::env::temp_dir().join(format!("larp-client-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let root = {
+            std::fs::create_dir_all(&root).unwrap();
+            root.canonicalize().unwrap()
+        };
+        for version in ["0.159.2-arm64", "0.160.0-arm64"] {
+            let bin = root.join(version).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("codex"), "#!/bin/sh\nexit 0\n").unwrap();
+        }
+        let mut registry = crate::registry::Registry::default();
+        super::add_client(
+            &mut registry,
+            "codex",
+            root.join("0.159.2-arm64/bin/codex").to_str().unwrap(),
+        )
+        .unwrap();
+        registry
+            .clients
+            .get_mut("codex")
+            .unwrap()
+            .commands
+            .insert(("demo".into(), "check".into()));
+        registry
+            .clients
+            .get_mut("codex")
+            .unwrap()
+            .secrets
+            .insert(("demo".into(), "token".into()));
+        registry
+            .clients
+            .get_mut("codex")
+            .unwrap()
+            .exec
+            .insert("demo".into());
+        let pattern = format!("{}/*/bin/codex", root.display());
+        super::update_client(&mut registry, "codex", &pattern).unwrap();
+        assert_eq!(registry.clients["codex"].process, pattern);
+        assert_eq!(registry.clients["codex"].commands.len(), 1);
+        assert_eq!(registry.clients["codex"].secrets.len(), 1);
+        assert!(registry.clients["codex"].exec.contains("demo"));
+        assert!(registry
+            .client_for_process(root.join("0.160.0-arm64/bin/codex").to_str().unwrap())
+            .is_some());
+        assert!(super::add_client(&mut registry, "other", &pattern).is_err());
+        // The fixture is unsigned: recapturing would replace this identity
+        // with PathOnly. A path-only edit must retain the signed requirement.
+        registry.clients.get_mut("codex").unwrap().identity =
+            crate::registry::ClientIdentity::Signed {
+                requirement: "test registered requirement".into(),
+            };
+        super::update_client(
+            &mut registry,
+            "codex",
+            root.join("0.160.0-arm64/bin/codex").to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(registry.clients["codex"].identity.label(), "signed");
+        super::update_client(&mut registry, "codex", &pattern).unwrap();
+        assert_eq!(registry.clients["codex"].identity.label(), "signed");
+        let before = serde_json::to_string(&registry).unwrap();
+        assert!(super::update_client(
+            &mut registry,
+            "codex",
+            &format!("{}/missing*/bin/codex", root.display())
+        )
+        .is_err());
+        assert_eq!(before, serde_json::to_string(&registry).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn import_resolves_relative_file_from_admin_cwd() {

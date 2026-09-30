@@ -94,7 +94,8 @@ An `exec` grant plus a secret grant permits arbitrary code to use that secret. G
 ## Admin commands
 
 ```text
-client add [name process-path]       client remove <name>       client list
+client add [name process-path]       client update <name> [process-path]
+client remove <name>                 client list
 project add <name> [--cwd <path>]    project cwd <name> <path>
 project rename <old> <new>
 project remove <name>                project list
@@ -114,6 +115,8 @@ password change                     help      exit
 
 `larp` and `larp help` show the launcher commands. In the console, `help` shows management commands. Up and Down browse history; Option+Left and Option+Right move by word. `larp help mcp`, `larp client --help`, and `larp client add --help` work without admin authentication; `client add --help` works in the console. Standalone management commands ask for the admin password each time; the console asks once and locks after 15 minutes of inactivity. `password change` asks for the current password. Passwords are read without terminal echo and are not accepted as arguments or environment variables.
 
+Client paths support `*` within one path component. For example, `client update codex "/Users/B/.codex/packages/app-server-daemon/releases/*/bin/codex"` accepts any single release folder. Quote patterns in shell commands to prevent shell expansion. A pattern must match at least one existing file, and new registrations require all matches to have the same signing identity. Use canonical paths for patterns; symlink paths that resolve outside the pattern are rejected. Only `*` is special; it does not cross `/`. If multiple clients match a running executable, authorization is denied. `client update` preserves all grants. When the new path includes an executable matched by the existing signed registration, it retains that signing identity and avoids re-verifying every installed release. Otherwise it captures the identity from the matching files. Running signed clients are still verified on each connection. Omit the path to be prompted.
+
 `command update` replaces a saved command without removing its client grants. Use it to replace older commands whose executable was saved as an absolute path.
 For `command add` and `command update`, `--cwd` may be relative to the directory where you launched the admin console. LARP shows the resolved absolute directory for confirmation, then saves it. Without `--cwd`, it saves the console's current directory.
 
@@ -123,7 +126,7 @@ LARP stores the registry in `~/.config/larp/registry.json` and a salted Argon2id
 
 MCP captures stdout and stderr and returns them after the command ends, with exit code, timeout, and truncation status. Each stream is limited to 64 KiB; commands time out after 120 seconds. LARP replaces loaded secret values and common Base64, hex, URL, and JSON encodings in returned logs with `REDACTED`. Partial values, hashes, and custom transformations can still leak. Commands run as your macOS user and are not sandboxed. LARP snapshots the `PATH` of `larp start`, adds the project's `node_modules/.bin`, and passes that PATH to child processes. MCP callers cannot override it. The launched executable's directory is also included so its scripts can find it.
 
-The private socket is `/private/tmp/larp-<user ID>/mcp.sock`. LARP checks its peer user and PID and resolves the bridge's parent from macOS. Signed client registrations use a captured code-signing requirement; unsigned and older registrations are explicitly **path-only**. Remove and re-add an older signed client to capture its signature. MCP `clientInfo` is not used as identity.
+The private socket is `/private/tmp/larp-<user ID>/mcp.sock`. LARP checks its peer user and PID and resolves the bridge's parent from macOS. Signed client registrations use a captured code-signing requirement; unsigned and older registrations are explicitly **path-only**. Use `client update` on an older signed client to capture its signature. MCP `clientInfo` is not used as identity.
 
 The `larp start` terminal shows short, readable client and command activity. It does not print process paths, PIDs, command arguments, environment values, or secret references. The private rotating audit file remains JSON Lines for structured review and records decisions without command output or secret values.
 
