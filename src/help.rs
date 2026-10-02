@@ -62,6 +62,7 @@ project                                                     Commands and secrets
 command                                                     Saved commands
   add <project> <name> "<command>" [--cwd <path>]           Save a command
   update <project> <name> "<command>" [--cwd <path>]        Replace a command; keep grants
+  env <project> <name> <file>|--clear                        Set secret bindings only
   remove <project> <name>                                   Remove a command
   list <project>                                            Show saved commands
 
@@ -102,9 +103,11 @@ Option+Left/Right moves by word; Up/Down browses history."#,
         Some("command") => r#"Save a command and its working directory.
   command add <project> <name> "<command and arguments>" [--cwd <directory>]
   command update <project> <name> "<command and arguments>" [--cwd <directory>]
+  command env <project> <name> <reference-file>|--clear
   command list <project>
   command remove <project> <name>
-Relative --cwd paths are shown as absolute paths for confirmation before saving."#,
+Relative --cwd and reference-file paths are confirmed before saving.
+Command env changes only secret bindings; its clients need only the command grant."#,
         Some("secret") => r#"Register 1Password references, not secret values.
   secret add <project> <name> <op://vault/item/field>
   secret import <project> <file>
@@ -119,7 +122,8 @@ For a relative path, LARP shows the absolute path before reading."#,
   exec(project, argv, env?)      Run an argument array; requires exec access
 
 env is an optional absolute path to a NAME=op://... file.
-Each reference must be registered and granted to the client."#,
+Caller-supplied references must be registered and granted to the client.
+Saved command bindings are injected from the cache with the command grant."#,
         Some("permission") => r#"Clients start with no access.
   permission add <client> command <project> <command-name>
   permission add <client> secret <project> <secret-name>
@@ -178,10 +182,11 @@ pub(crate) fn print_action(topic: &str, action: &str) -> Result<(), String> {
         ("project", "rename") => "project rename <old> <new>\nRename a project, keeping its commands, secrets, and client grants.",
         ("project", "remove") => "project remove <name>\nRemove the project and its client grants.",
         ("project", "list") => "project list\nShow projects and their exec working directories.",
-        ("command", "add") => "command add <project> <name> \"<command and arguments>\" [--cwd <directory>]\nSave a command. Relative --cwd paths are confirmed and saved as absolute paths.",
-        ("command", "update") => "command update <project> <name> \"<command and arguments>\" [--cwd <directory>]\nReplace a saved command and keep its grants. Relative --cwd paths are confirmed.",
+        ("command", "add") => "command add <project> <name> \"<command and arguments>\" [--cwd <directory>]\nSave a command. Relative --cwd paths are confirmed.",
+        ("command", "update") => "command update <project> <name> \"<command and arguments>\" [--cwd <directory>]\nReplace a saved command and keep its grants and secret bindings. Without --cwd, keep its cwd.",
+        ("command", "env") => "command env <project> <name> <reference-file>|--clear\nBind registered secrets from a reference file without changing argv or cwd. Relative paths are confirmed; --clear removes bindings.",
         ("command", "remove") => "command remove <project> <name>\nRemove a fixed command and related grants.",
-        ("command", "list") => "command list <project>\nShow fixed commands and their working directories.",
+        ("command", "list") => "command list <project>\nShow fixed commands, working directories, and bound secret variable names.",
         ("secret", "add") => "secret add <project> <name> <op://vault/item/field>\nRegister a 1Password reference, not its value.",
         ("secret", "import") => "secret import <project> <file>\nRegister NAME=op://... entries. Relative paths are resolved from the current directory and confirmed before reading. Validate the whole file first, skip identical entries, then resolve conflicts with Yes, No, or Abort before saving anything. Existing grants are unchanged.",
         ("secret", "remove") => "secret remove <project> <name>\nRemove a reference and its grants.",

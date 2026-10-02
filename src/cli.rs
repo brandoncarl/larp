@@ -106,16 +106,14 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
                 println!("{name}\t{}", project.cwd);
             }
         }
-        ["command", "add" | "update", project, name, command]
-        | ["command", "add" | "update", project, name, command, "--cwd", _] => {
+        ["command", action @ ("add" | "update"), project, name, command]
+        | ["command", action @ ("add" | "update"), project, name, command, "--cwd", _] => {
             registry::name(name)?;
-            let exists = project_ref(&registry, project)?
-                .commands
-                .contains_key(*name);
-            if words[1] == "add" && exists {
+            let existing = project_ref(&registry, project)?.commands.get(*name);
+            if *action == "add" && existing.is_some() {
                 return Err("command already exists; use 'command update' to replace it".into());
             }
-            if words[1] == "update" && !exists {
+            if *action == "update" && existing.is_none() {
                 return Err("command does not exist; use 'command add' to create it".into());
             }
             let argv = shlex::split(command).ok_or("invalid command quoting")?;
@@ -123,18 +121,51 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
                 return Err("command is empty".into());
             }
             let current = std::env::current_dir().map_err(|_| "could not read cwd")?;
-            let (cwd, relative) = if words.len() == 7 {
-                resolve_command_cwd(words[6], &current)?
-            } else {
-                resolve_command_cwd(&current.to_string_lossy(), &current)?
+            let (cwd, relative) = match words.as_slice() {
+                [.., "--cwd", path] => resolve_command_cwd(path, &current)?,
+                _ if *action == "update" => (existing.unwrap().cwd.clone(), false),
+                _ => resolve_command_cwd(&current.to_string_lossy(), &current)?,
             };
             if relative {
                 confirm_command_cwd(&cwd)?;
             }
             crate::runner::resolve_executable(&argv[0], &cwd)?;
+            let env = existing
+                .map(|command| command.env.clone())
+                .unwrap_or_default();
             let item = project_mut(&mut registry, project)?;
             item.commands
-                .insert(name.to_string(), RegisteredCommand { argv, cwd });
+                .insert(name.to_string(), RegisteredCommand { argv, cwd, env });
+            changed = true;
+        }
+        ["command", "env", project, name, "--clear"] => {
+            project_mut(&mut registry, project)?
+                .commands
+                .get_mut(*name)
+                .ok_or("command does not exist")?
+                .env
+                .clear();
+            changed = true;
+        }
+        ["command", "env", project, name, path] => {
+            if !project_ref(&registry, project)?
+                .commands
+                .contains_key(*name)
+            {
+                return Err("command does not exist".into());
+            }
+            let current = std::env::current_dir().map_err(|_| "could not read cwd")?;
+            let (resolved, relative) = resolve_import_path(path, &current)?;
+            if relative {
+                confirm_reference_path(&resolved, "command environment")?;
+            }
+            let mappings = crate::env_file::read(&resolved.to_string_lossy())?;
+            let env = command_env_bindings(project_ref(&registry, project)?, &mappings)?;
+            project_mut(&mut registry, project)?
+                .commands
+                .get_mut(*name)
+                .expect("command checked above")
+                .env = env;
             changed = true;
         }
         ["command", "remove", project, name] => {
@@ -156,9 +187,10 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
             }
             for (name, command) in commands {
                 println!(
-                    "{name}\t{}\t{}",
+                    "{name}\t{}\t{}\t{}",
                     command.cwd,
-                    shlex::try_join(command.argv.iter().map(String::as_str)).unwrap_or_default()
+                    shlex::try_join(command.argv.iter().map(String::as_str)).unwrap_or_default(),
+                    command.env.keys().cloned().collect::<Vec<_>>().join(",")
                 );
             }
         }
@@ -350,6 +382,9 @@ fn success_message(words: &[&str]) -> String {
         [kind @ ("command" | "secret"), "add" | "update", project, name, ..] => {
             format!("Saved {kind} {name} in {project}.")
         }
+        ["command", "env", project, name, ..] => {
+            format!("Updated command environment for {name} in {project}.")
+        }
         [kind @ ("command" | "secret"), "remove", project, name] => {
             format!("Removed {kind} {name} from {project}.")
         }
@@ -361,6 +396,23 @@ fn success_message(words: &[&str]) -> String {
         ["project", "rename", old, new] => format!("Renamed project {old} to {new}."),
         _ => "Saved.".into(),
     }
+}
+
+fn command_env_bindings(
+    project: &Project,
+    mappings: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, String> {
+    mappings
+        .iter()
+        .map(|(variable, reference)| {
+            if project.secrets.get(variable) != Some(reference) {
+                return Err(format!(
+                    "command environment {variable} must match a registered secret of the same name"
+                ));
+            }
+            Ok((variable.clone(), variable.clone()))
+        })
+        .collect()
 }
 
 fn resolve_import_path(path: &str, cwd: &Path) -> Result<(PathBuf, bool), String> {
@@ -420,16 +472,20 @@ fn confirm_command_cwd(path: &str) -> Result<(), String> {
 }
 
 fn confirm_import_path(path: &Path) -> Result<(), String> {
+    confirm_reference_path(path, "secret import")
+}
+
+fn confirm_reference_path(path: &Path, purpose: &str) -> Result<(), String> {
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
-        return Err(
-            "relative secret imports need an interactive terminal; no changes saved".into(),
-        );
+        return Err(format!(
+            "relative {purpose} paths need an interactive terminal; no changes saved"
+        ));
     }
     println!(
-        "Import directory: {}",
+        "{purpose} directory: {}",
         path.parent().unwrap_or(path).display()
     );
-    println!("Import file:      {}", path.display());
+    println!("{purpose} file: {}", path.display());
     loop {
         print!("Use this file? [y]es / [n]o: ");
         io::stdout()
@@ -441,11 +497,11 @@ fn confirm_import_path(path: &Path) -> Result<(), String> {
             .map_err(|_| "could not read import response")?
             == 0
         {
-            return Err("secret import cancelled; no changes saved".into());
+            return Err(format!("{purpose} cancelled; no changes saved"));
         }
         match answer.trim().to_ascii_lowercase().as_str() {
             "y" | "yes" => return Ok(()),
-            "n" | "no" => return Err("secret import cancelled; no changes saved".into()),
+            "n" | "no" => return Err(format!("{purpose} cancelled; no changes saved")),
             _ => println!("Choose Yes or No."),
         }
     }
@@ -716,9 +772,29 @@ fn prompt(label: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_secret_import, resolve_command_cwd, resolve_import_path, ImportDecision};
+    use super::{
+        command_env_bindings, plan_secret_import, resolve_command_cwd, resolve_import_path,
+        ImportDecision,
+    };
     use std::collections::BTreeMap;
     use std::path::Path;
+
+    #[test]
+    fn command_environment_must_match_registered_references() {
+        let mut project = crate::registry::Project::default();
+        project
+            .secrets
+            .insert("API_KEY".into(), "op://vault/item/key".into());
+        let mappings = BTreeMap::from([("API_KEY".into(), "op://vault/item/key".into())]);
+        assert_eq!(
+            command_env_bindings(&project, &mappings).unwrap()["API_KEY"],
+            "API_KEY"
+        );
+        let wrong = BTreeMap::from([("API_KEY".into(), "op://vault/other/key".into())]);
+        assert!(command_env_bindings(&project, &wrong).is_err());
+        let alias = BTreeMap::from([("ALIAS".into(), "op://vault/item/key".into())]);
+        assert!(command_env_bindings(&project, &alias).is_err());
+    }
 
     #[test]
     fn wildcard_client_update_preserves_grants_and_failure_is_atomic() {

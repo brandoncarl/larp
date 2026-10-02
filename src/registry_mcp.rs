@@ -577,6 +577,7 @@ mod tests {
                 crate::registry::RegisteredCommand {
                     argv: vec!["/bin/true".into()],
                     cwd: "/private/tmp".into(),
+                    env: Default::default(),
                 },
             );
         runner

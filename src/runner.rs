@@ -172,7 +172,15 @@ impl Runner {
         {
             return Err("client is not permitted to run this command".into());
         }
-        self.run_argv(client, project, &command.argv, &command.cwd, env, true)
+        self.run_argv(
+            client,
+            project,
+            &command.argv,
+            &command.cwd,
+            &command.env,
+            env,
+            true,
+        )
     }
 
     pub fn exec(
@@ -205,7 +213,15 @@ impl Runner {
         if bytes > 32 * 1024 || argv[0].is_empty() {
             return Err("exec argv exceeds limits".into());
         }
-        self.run_argv(client, project, argv, &project_item.cwd, env, false)
+        self.run_argv(
+            client,
+            project,
+            argv,
+            &project_item.cwd,
+            &BTreeMap::new(),
+            env,
+            false,
+        )
     }
 
     fn run_argv(
@@ -214,6 +230,7 @@ impl Runner {
         project: &str,
         argv: &[String],
         cwd: &str,
+        command_env: &BTreeMap<String, String>,
         env: Option<&str>,
         allow_op: bool,
     ) -> Result<RunResult, String> {
@@ -224,12 +241,28 @@ impl Runner {
             .get(project)
             .ok_or("project does not exist")?;
         let mut injected = Vec::new();
+        for (variable, name) in command_env {
+            crate::registry::env_name(variable)?;
+            if variable == "PATH" || variable.starts_with("DYLD_") || variable.starts_with("LD_") {
+                return Err("command environment uses a reserved variable name".into());
+            }
+            if !project_item.secrets.contains_key(name) {
+                return Err("command environment includes an unregistered secret".into());
+            }
+            let value = values
+                .get(&(project.to_owned(), name.to_owned()))
+                .ok_or("registered secret was not loaded")?;
+            injected.push((variable.as_str(), value.as_str()));
+        }
         let mappings = match env {
             Some(path) => Some(env_file::read(path)?),
             None => None,
         };
         if let Some(mappings) = &mappings {
             for (variable, reference) in mappings {
+                if command_env.contains_key(variable) {
+                    return Err("reference file overrides a registered command variable".into());
+                }
                 let secret_name = project_item
                     .secrets
                     .iter()
@@ -674,6 +707,7 @@ pub(crate) mod tests {
             RegisteredCommand {
                 argv: vec!["tool".into()],
                 cwd: directory.to_string_lossy().into_owned(),
+                env: BTreeMap::new(),
             },
         );
         let client = &runner.registry.clients["test"];
@@ -712,6 +746,7 @@ pub(crate) mod tests {
                 RegisteredCommand {
                     argv: vec!["/bin/sh".into(), "-c".into(), "cargo".into()],
                     cwd: "/private/tmp".into(),
+                    env: BTreeMap::new(),
                 },
             );
         let result = runner
@@ -733,6 +768,7 @@ pub(crate) mod tests {
             RegisteredCommand {
                 argv: vec!["/usr/bin/env".into()],
                 cwd: "/private/tmp".into(),
+                env: BTreeMap::new(),
             },
         );
         project
@@ -777,6 +813,35 @@ pub(crate) mod tests {
         assert!(result.stdout.contains("API_KEY=REDACTED"));
         assert!(!result.stdout.contains("dummy-secret-value"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn registered_command_uses_cached_secret_without_client_secret_grant() {
+        let mut runner = dummy();
+        runner
+            .registry
+            .projects
+            .get_mut("demo")
+            .unwrap()
+            .commands
+            .get_mut("inspect")
+            .unwrap()
+            .env
+            .insert("API_KEY".into(), "api_key".into());
+        let client = runner.registry.clients.get_mut("test").unwrap();
+        client.secrets.clear();
+        client.exec.insert("demo".into());
+        let client = &runner.registry.clients["test"];
+
+        let command = runner.run(client, "demo", "inspect", None).unwrap();
+        assert_eq!(command.status, Some(0));
+        assert!(command.stdout.contains("API_KEY=REDACTED"));
+
+        let exec = runner
+            .exec(client, "demo", &["/usr/bin/env".into()], None)
+            .unwrap();
+        assert_eq!(exec.status, Some(0));
+        assert!(!exec.stdout.contains("API_KEY="));
     }
 
     #[test]

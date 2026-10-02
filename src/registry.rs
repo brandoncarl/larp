@@ -74,6 +74,8 @@ pub struct Project {
 pub struct RegisteredCommand {
     pub argv: Vec<String>,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Registry {
@@ -305,6 +307,7 @@ mod tests {
             RegisteredCommand {
                 argv: vec!["/bin/echo".into(), "ok".into()],
                 cwd: "/tmp/example".into(),
+                env: Default::default(),
             },
         );
         project

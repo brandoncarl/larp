@@ -59,9 +59,11 @@ larp> secret import demo .env.op
 
 For a relative path, LARP resolves it from the admin console's current directory and shows the absolute directory and file for confirmation before reading. Absolute paths also work. LARP validates the whole file before changing its registry. It skips identical registrations. For each name whose registered reference differs, choose **Yes** to overwrite it, **No** to keep it, or **Abort** to save nothing from the import. A non-interactive import with conflicts fails without changes. The import does not grant any client access; use `permission add <client> secret <project> <name>` for each secret the client may receive. **Existing grants by name continue to apply after an overwrite**, so review the new reference before choosing Yes. LARP loads added or replaced references on the next MCP call.
 
-The file is read for each MCP call. LARP uses its variable names, matches each `op://` reference to a secret registered under that project, checks the calling client's secret grant, and injects the value already held in memory. It rejects the whole call if any reference is unregistered or ungranted. Changing the file needs no restart when all its references are already registered and loaded. Registering a new reference loads it on the next MCP call. To pick up a changed value at an unchanged reference, restart `larp start`.
+For caller-supplied `env`, the file is read for each MCP call. LARP matches each `op://` reference to a secret registered under that project, checks the calling client's secret grant, and injects the value already held in memory. It rejects the whole call if any reference is unregistered or ungranted. Changing the file needs no restart when all its references are already registered and loaded. Registering a new reference loads it on the next MCP call. To pick up a changed value at an unchanged reference, restart `larp start`.
 
-The `env` parameter is an **absolute path** to a regular reference-only file. It is optional; without it, LARP injects no secrets. The file is limited to 1 MiB and 256 variables. Plaintext values, duplicate names, and reserved execution variables such as `PATH` are rejected. LARP does not save the file path or resolved values in its registry.
+An administrator can bind a reference file to an existing command with `command env <project> <name> <path>`. Every variable must have a registered secret of the same name and matching reference. LARP saves the variable-to-secret names, not the file path or values. Running that command injects those secrets from the first-load cache without an `env` argument or separate client secret grants. The command grant therefore authorizes use of every secret bound to the command. `exec` does not receive these bindings. If a caller also passes `env`, it cannot override a saved command variable. Run `command env` again to replace the bindings or use `--clear` to remove them. Neither action changes the saved arguments or working directory.
+
+The `env` parameter is an **absolute path** to a regular reference-only file. It is optional; without it, LARP injects only a command's saved bindings, if any. The file is limited to 1 MiB and 256 variables. Plaintext values, duplicate names, and reserved execution variables such as `PATH` are rejected. LARP does not save the file path or resolved values in its registry.
 
 ## MCP tools
 
@@ -70,16 +72,16 @@ LARP exposes three tools:
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `commands` | Optional `project` | Lists this client's granted commands, `exec` access, and secret names across projects, or filters to one project. It returns no values or 1Password references. |
-| `command` | `project`, `name`, optional `env` | Runs a registered command with its saved arguments and working directory. |
+| `command` | `project`, `name`, optional `env` | Runs a registered command with its saved arguments, working directory, and administrator-bound secrets. |
 | `exec` | `project`, `argv`, optional `env` | Runs caller-supplied argument array in the project's fixed working directory. Requires a separate `exec` grant. |
 
-Call `commands` first if you do not know what this client can run. To run the registered `check` command with the file above:
+Call `commands` first if you do not know what this client can run. After an administrator binds the file with `command env demo check /path/to/project/.env.op`, run `check` without passing a file:
 
 ```json
-{"project":"demo","name":"check","env":"/path/to/project/.env.op"}
+{"project":"demo","name":"check"}
 ```
 
-For an ad hoc command, first grant `exec` to the client for that project. It still needs a grant for every secret named by the file:
+For caller-supplied `env` on a command or an ad hoc `exec`, grant the client each secret named by the file. An ad hoc command also needs an `exec` grant for the project:
 
 ```text
 larp> permission add codex exec demo
@@ -101,6 +103,7 @@ project rename <old> <new>
 project remove <name>                project list
 command add <project> <name> <command> [--cwd <path>]
 command update <project> <name> <command> [--cwd <path>]
+command env <project> <name> <file>|--clear
 command remove <project> <name>      command list <project>
 secret add <project> <name> <op://reference>
 secret import <project> <file>
@@ -117,8 +120,9 @@ password change                     help      exit
 
 Client paths support `*` within one path component. For example, `client update codex "/Users/B/.codex/packages/app-server-daemon/releases/*/bin/codex"` accepts any single release folder. Quote patterns in shell commands to prevent shell expansion. A pattern must match at least one existing file, and new registrations require all matches to have the same signing identity. Use canonical paths for patterns; symlink paths that resolve outside the pattern are rejected. Only `*` is special; it does not cross `/`. If multiple clients match a running executable, authorization is denied. `client update` preserves all grants. When the new path includes an executable matched by the existing signed registration, it retains that signing identity and avoids re-verifying every installed release. Otherwise it captures the identity from the matching files. Running signed clients are still verified on each connection. Omit the path to be prompted.
 
-`command update` replaces a saved command without removing its client grants. Use it to replace older commands whose executable was saved as an absolute path.
-For `command add` and `command update`, `--cwd` may be relative to the directory where you launched the admin console. LARP shows the resolved absolute directory for confirmation, then saves it. Without `--cwd`, it saves the console's current directory.
+`command update` replaces a saved command without removing its client grants or environment bindings. Use it to replace older commands whose executable was saved as an absolute path.
+For `command add` and `command update`, `--cwd` may be relative to the directory where you launched the admin console. LARP shows the resolved directory for confirmation, then saves it. Without `--cwd`, a new command uses the console's current directory; an update keeps the saved directory. `command env` accepts an absolute reference-file path or confirms a relative path before reading it. The file path is not saved.
+`command list <project>` shows each command's bound environment variable names without exposing values.
 
 ## Security and storage
 

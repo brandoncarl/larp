@@ -20,14 +20,13 @@ Install with `brew install brandoncarl/tap/larp`. Homebrew downloads a prebuilt 
    client add
    secret import demo .env.op
    command add demo check "pwd" --cwd .
+   command env demo check .env.op
    permission add codex command demo check
-   permission add codex secret demo API_TOKEN
-   permission add codex secret demo SERVICE_PASSWORD
    permission list codex
    exit
    ```
 
-   At the `client add` prompts, enter `codex` and the absolute path to Codex's executable. For an import from a relative path, confirm the absolute file path LARP displays. Importing secrets does not grant access; the `permission` lines do.
+   At the `client add` prompts, enter `codex` and the absolute path to Codex's executable. For a relative reference-file path, confirm the absolute path LARP displays. `command env` binds registered secrets to `check`; its command grant permits use of those bindings without granting the client direct secret access.
 
    If you do not know the client's executable path, start LARP and connect the client once. The `larp start` terminal shows the path for an unregistered caller and a `client add` command to copy into the admin console. The MCP caller sees only an authorization error.
 
@@ -56,7 +55,7 @@ Install with `brew install brandoncarl/tap/larp`. Homebrew downloads a prebuilt 
 
    Replace `/usr/local/bin/larp` with your installed LARP path if different. Keep any other entries already in `mcpServers`. Start `larp start` separately, then connect Cascade. If Cascade is not registered, the `larp start` terminal shows its executable path; add it as a client and grant it the project permissions it needs.
 
-7. **Test without exposing values.** Ask the client to call `commands(project="demo")`, then `command(project="demo", name="check", env="/absolute/path/to/project/.env.op")`. The `env` path must be absolute. LARP injects only registered references granted to that client and returns redacted command output. Without `env`, it injects no secrets. Replace `pwd` with a useful project command once the connection works.
+7. **Test without exposing values.** Ask the client to call `commands(project="demo")`, then `command(project="demo", name="check")`. LARP injects the command's saved bindings from memory and returns redacted output. The client does not need separate secret grants. Replace `pwd` with a useful project command once the connection works. Caller-supplied `env` remains available for clients with separate secret grants.
 
 If LARP is stopped, the MCP connection stays open and tool calls return a retryable error. Start LARP and retry the call in the same chat. A bridge launched directly from a terminal has that terminal's caller identity; test client permissions through the registered MCP application.
 
