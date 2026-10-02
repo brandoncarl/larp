@@ -17,7 +17,7 @@ use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 const OUTPUT_LIMIT: usize = 64 * 1024;
-const TIMEOUT: Duration = Duration::from_secs(120);
+const TIMEOUT: Duration = Duration::from_secs(180);
 
 pub struct Runner {
     pub registry: Registry,
@@ -172,7 +172,7 @@ impl Runner {
         {
             return Err("client is not permitted to run this command".into());
         }
-        self.run_argv(client, project, &command.argv, &command.cwd, env)
+        self.run_argv(client, project, &command.argv, &command.cwd, env, true)
     }
 
     pub fn exec(
@@ -205,7 +205,7 @@ impl Runner {
         if bytes > 32 * 1024 || argv[0].is_empty() {
             return Err("exec argv exceeds limits".into());
         }
-        self.run_argv(client, project, argv, &project_item.cwd, env)
+        self.run_argv(client, project, argv, &project_item.cwd, env, false)
     }
 
     fn run_argv(
@@ -215,6 +215,7 @@ impl Runner {
         argv: &[String],
         cwd: &str,
         env: Option<&str>,
+        allow_op: bool,
     ) -> Result<RunResult, String> {
         let values = self.values()?;
         let project_item = self
@@ -247,6 +248,14 @@ impl Runner {
             }
         }
         let executable = resolve_with_path(&argv[0], cwd, &self.path)?;
+        if !allow_op
+            && (Path::new(&argv[0])
+                .file_name()
+                .is_some_and(|name| name == "op")
+                || executable.file_name().is_some_and(|name| name == "op"))
+        {
+            return Err("Cannot run the 1Password CLI through exec; use registered secrets".into());
+        }
         let path = execution_path(&executable, cwd, &self.path)?;
         let _permit = self.commands.acquire().ok_or(limits::BUSY)?;
         let mut child_command = Command::new(&executable);
@@ -858,6 +867,49 @@ pub(crate) mod tests {
         assert!(!result.stdout.contains("dummy-secret-value"));
         assert!(runner.exec(client, "demo", &[], None).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn exec_rejects_op_before_starting_it() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = std::env::temp_dir().join(format!(
+            "larp-op-test-{}-{}",
+            std::process::id(),
+            OsRng.next_u64()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let executable = directory.join("op");
+        let marker = directory.join("called");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = directory.join("alias");
+        symlink(&executable, &alias).unwrap();
+
+        let mut runner = dummy();
+        runner.path = Arc::new(vec![directory.clone()]);
+        runner
+            .registry
+            .clients
+            .get_mut("test")
+            .unwrap()
+            .exec
+            .insert("demo".into());
+        let client = &runner.registry.clients["test"];
+        for program in [
+            "op".to_owned(),
+            executable.display().to_string(),
+            alias.display().to_string(),
+        ] {
+            let error = runner.exec(client, "demo", &[program], None).err().unwrap();
+            assert!(error.contains("1Password CLI"));
+            assert!(!marker.exists());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     pub(crate) fn reference_file(contents: &str) -> std::path::PathBuf {

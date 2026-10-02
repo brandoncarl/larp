@@ -92,7 +92,7 @@ pub fn tool_catalog() -> Value {
     },{
         "name":"exec",
         "title":"Execute arguments",
-        "description":"Run caller-supplied arguments in the project's fixed working directory. Requires an exec grant. Optional env has the same reference-only rules as command and requires a grant for every referenced secret. This tool can execute arbitrary code as the local user; stdout and stderr are returned after exit with known secret values redacted.",
+        "description":"Run caller-supplied arguments in the project's fixed working directory. Requires an exec grant. Direct calls to the 1Password CLI (op) are rejected; use env to inject granted secrets. Optional env has the same reference-only rules as command and requires a grant for every referenced secret. Scripts can still invoke op. Stdout and stderr are returned after exit with known secret values redacted.",
         "inputSchema":{"type":"object","properties":{
             "project":{"type":"string","description":"Registered project with an exec grant."},
             "argv":{"type":"array","items":{"type":"string"},"minItems":1,"description":"Executable followed by individual arguments; no implicit shell."},
