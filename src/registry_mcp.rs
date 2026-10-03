@@ -98,6 +98,12 @@ pub fn tool_catalog() -> Value {
             "argv":{"type":"array","items":{"type":"string"},"minItems":1,"description":"Executable followed by individual arguments; no implicit shell."},
             "env":{"type":"string","description":"Optional absolute path to a reference-only .env.op file."}
         },"required":["project","argv"],"additionalProperties":false}
+    },{
+        "name":"register",
+        "title":"Request client registration",
+        "description":"Ask the user to register this MCP caller. LARP verifies the executable through the OS and prompts in the larp start terminal for confirmation and the admin password. Registration grants no permissions. Already registered callers return their existing client name. Do not retry a declined request unless the user asks.",
+        "annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},
+        "inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Proposed client name: 1–64 ASCII letters, digits, underscores, or hyphens.","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"}},"required":["name"],"additionalProperties":false}
     }]})
 }
 
@@ -551,7 +557,7 @@ mod tests {
             .map(|line| serde_json::from_slice(line).unwrap())
             .collect();
         let tools = &responses[1]["result"]["tools"];
-        assert_eq!(tools.as_array().unwrap().len(), 3);
+        assert_eq!(tools.as_array().unwrap().len(), 4);
         assert_eq!(tools[0]["name"], "commands");
         assert_eq!(tools[1]["name"], "command");
         assert_eq!(tools[2]["name"], "exec");

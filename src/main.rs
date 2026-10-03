@@ -1,12 +1,14 @@
 mod admin;
 mod audit;
 mod cli;
+mod dashboard;
 mod env_file;
 mod help;
 mod identity;
 mod limits;
 mod line_editor;
 mod redaction;
+mod registration;
 mod registry;
 mod registry_mcp;
 mod runner;
@@ -55,6 +57,7 @@ fn run() -> Result<(), String> {
         }
         ["start"] => runtime::start(),
         ["admin"] => admin::repl(),
+        ["dash"] => dashboard::start(),
         ["mcp"] => runtime::bridge(),
         _ => Err("unknown command or extra arguments; run 'larp help'".into()),
     }

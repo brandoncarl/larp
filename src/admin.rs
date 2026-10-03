@@ -160,7 +160,7 @@ pub fn repl() -> Result<(), String> {
             ["?"] => crate::help::print(None, crate::help::Context::Admin)?,
             ["?", topic] => crate::help::print(Some(topic), crate::help::Context::Admin)?,
             ["admin"] => crate::ui::note("Already in admin. Type help or list."),
-            ["start" | "mcp" | "auth", ..] => {
+            ["start" | "mcp" | "auth" | "dash", ..] => {
                 crate::ui::error("Run this outside admin. Type help for available commands.")
             }
             _ => {

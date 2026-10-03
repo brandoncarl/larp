@@ -42,6 +42,16 @@ Windsurf Cascade uses a JSON `mcpServers` entry instead. See the [Cascade exampl
 
 The server and bridge must run the same LARP version. Start the server from a shell whose `PATH` includes the tools your commands need; restart it after changing that `PATH`. Permission, command, project, and secret registration changes take effect on the next MCP call. LARP loads only new or changed secret references from 1Password and updates its in-memory set after every read succeeds. A failed read leaves the prior set intact and returns an error you can retry. Client registration changes take effect on the next connection; reconnect the MCP client after a client change. `start` does not ask for the LARP admin password. The bridge opens a fresh local connection for each request, so restarting `larp start` does not leave an existing MCP chat attached to a dead socket. A call made while the server is unavailable returns a retryable error. LARP never automatically retries a command whose outcome is unknown.
 
+## Dashboard
+
+Run `larp dash` to manage client access in your browser. Enter your existing admin password in the terminal (run `larp admin` first if you have not set one). LARP opens a private session on a random local loopback port.
+
+Clients appear in columns; permissions appear in rows grouped by project. Check or uncheck a command, secret, or arbitrary-command (`exec`) permission to save it immediately. Filter by project, select a client name to edit its process path or remove it, or use **Add client** to register a new client with no access. Editing a path preserves grants and uses the same identity checks as the admin console. Reconnect the MCP client after registration changes.
+
+Create projects, commands, and secret references through `larp admin`, then select **Refresh** in the dashboard. Command rows show their bound secret names, because granting a command also authorizes those bindings. The dashboard does not fetch secret values or display 1Password references.
+
+Keep the dashboard terminal running. Ctrl+C closes it; 15 minutes without dashboard API activity locks the session. Run `larp dash` again to reopen it. The browser URL contains a temporary session credential; keep it private.
+
 ## Use a reference file
 
 Create a file containing **only 1Password references**. `.env.op` is ignored by default because its vault, item, and field names may be sensitive. If you want to share a template, commit `.env.op.example`:
@@ -67,10 +77,11 @@ The `env` parameter is an **absolute path** to a regular reference-only file. It
 
 ## MCP tools
 
-LARP exposes three tools:
+LARP exposes four tools:
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
+| `register` | `name` | Requests registration of the OS-verified MCP caller. Requires confirmation and the admin password in the `larp start` terminal. Grants no permissions. |
 | `commands` | Optional `project` | Lists this client's granted commands, `exec` access, and secret names across projects, or filters to one project. It returns no values or 1Password references. |
 | `command` | `project`, `name`, optional `env` | Runs a registered command with its saved arguments, working directory, and administrator-bound secrets. |
 | `exec` | `project`, `argv`, optional `env` | Runs caller-supplied argument array in the project's fixed working directory. Requires a separate `exec` grant. |
@@ -92,6 +103,20 @@ larp> permission add codex exec demo
 ```
 
 An `exec` grant plus a secret grant permits arbitrary code to use that secret. Grant this combination only to clients trusted with that ability. LARP executes argument arrays directly; a shell runs only if explicitly named in `argv`.
+
+## Instructions for Claude and other agents
+
+Configure the agent to launch `/absolute/path/to/larp mcp` as a local stdio MCP server, using the absolute binary path reported by `command -v larp`. Keep `larp start` running separately in an interactive terminal. Give the agent these instructions:
+
+> Use LARP for commands that need credentials. Call `commands` first to discover permitted projects, saved commands, exec access, and secret names. If LARP says this client is not registered, call `register` once with a proposed name such as `claude`, and tell me to approve it in the `larp start` terminal. Registration grants no permissions; ask me to grant the required access in `larp dash`, then call `commands` again. Prefer `command` for saved commands. Use `exec` only when the project has an exec grant, with executable and arguments as an array. If needed, pass an absolute reference-only `.env.op` path as `env`; never request or print secret values. Do not bypass denied access or repeat declined registration requests. If a command's outcome is unknown, ask me before retrying.
+
+### Agent registration
+
+An unregistered agent may call `register` with `{"name":"claude"}`. The name is a suggestion, not identity: LARP derives the executable from the bridge's OS-verified parent process, captures its signing identity where available, and asks `Register claude (signed)? [yes/no/details]:` in the `larp start` terminal. Type **details** to inspect the full executable path. Type **yes** within 60 seconds, then enter your LARP admin password. Run `larp admin` first if you have not set a password.
+
+Approving creates a client with no command, secret, or exec grants. Open `larp dash` to grant access. Declining, timing out, an incorrect password, an unverifiable caller, or a changed identity prevents registration. LARP accepts only one approval prompt at a time and requires an interactive server terminal. Existing verified clients get their registered name back without another prompt or changes to their grants.
+
+The registration connection cannot run commands or disclose registry resources. Registration does not load secrets. An empty registry is sufficient to start the server and receive the first registration request; create projects and resources with `larp admin` as usual. Restart the server and reconnect the agent after upgrading so both use the same tool catalog and binary.
 
 ## Admin commands
 

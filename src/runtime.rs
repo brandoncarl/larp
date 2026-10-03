@@ -2,6 +2,7 @@ use crate::{
     audit::Audit,
     identity,
     limits::{self, Counter},
+    registration,
     registry::Registry,
     registry_mcp,
     runner::Runner,
@@ -139,12 +140,6 @@ pub fn start() -> Result<(), String> {
     fs::set_permissions(&path, Permissions::from_mode(0o600))
         .map_err(|_| "could not protect LARP socket")?;
     let registry = Registry::load()?;
-    if registry.clients.is_empty() && registry.projects.is_empty() {
-        return Err(
-            "registry is empty; use 'larp admin' to register a client and project before starting"
-                .into(),
-        );
-    }
     crate::ui::start_banner();
     crate::ui::start_waiting();
     let _ = io::stdout().flush();
@@ -185,13 +180,16 @@ fn serve_connection(stream: UnixStream, runner: &Runner, audit: &Audit) -> Resul
         .try_clone()
         .map_err(|_| "could not clone LARP socket")?;
     let mut reader = BufReader::new(reader);
-    if !read_bridge_preface(&mut reader)? {
+    let Some(preface) = read_bridge_preface(&mut reader)? else {
         return Ok(());
+    };
+    let bridge_pid = pid.ok_or("could not verify bridge process PID")?;
+    if preface.get("registration").and_then(Value::as_bool) == Some(true) {
+        return registration::serve(reader, stream, bridge_pid, uid, audit);
     }
     stream
         .set_read_timeout(None)
         .map_err(|_| "could not clear MCP handshake timeout")?;
-    let bridge_pid = pid.ok_or("could not verify bridge process PID")?;
     let current_registry = Registry::load().map_err(|_| "Could not load client registrations")?;
     let (client_name, identity_label, _) = match identity::identify(
         bridge_pid,
@@ -235,7 +233,7 @@ fn serve_connection(stream: UnixStream, runner: &Runner, audit: &Audit) -> Resul
     })
 }
 
-fn read_bridge_preface(reader: &mut impl BufRead) -> Result<bool, String> {
+fn read_bridge_preface(reader: &mut impl BufRead) -> Result<Option<Value>, String> {
     let mut preface = Vec::new();
     reader
         .by_ref()
@@ -243,13 +241,17 @@ fn read_bridge_preface(reader: &mut impl BufRead) -> Result<bool, String> {
         .read_until(b'\n', &mut preface)
         .map_err(|_| "could not read LARP bridge identity")?;
     if preface.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if preface.len() > 4096 || !preface.ends_with(b"\n") {
         return Err("Invalid LARP bridge identity".into());
     }
-    let _: Value = serde_json::from_slice(&preface).map_err(|_| "Invalid LARP bridge identity")?;
-    Ok(true)
+    let value: Value =
+        serde_json::from_slice(&preface).map_err(|_| "Invalid LARP bridge identity")?;
+    if !value.is_object() {
+        return Err("Invalid LARP bridge identity".into());
+    }
+    Ok(Some(value))
 }
 
 fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
@@ -424,7 +426,14 @@ fn bridge_request(
         retryable: true,
     })?;
     // The server verifies the bridge PID and its parent through the socket and OS.
-    let preface: &[u8] = if initialize {
+    let registration = serde_json::from_slice::<Value>(request)
+        .ok()
+        .is_some_and(|request| {
+            request["method"] == "tools/call" && request["params"]["name"] == "register"
+        });
+    let preface: &[u8] = if registration {
+        b"{\"registration\":true}\n{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}\n"
+    } else if initialize {
         b"{}\n"
     } else {
         b"{}\n{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"larp-bridge\",\"version\":\"1\"}}}\n"
@@ -517,6 +526,7 @@ mod tests {
         bridge_io, bridge_request, prepare_socket_path, read_bridge_preface, SocketCleanup,
     };
     use rand_core::RngCore;
+    use serde_json::Value;
     use std::fs;
     use std::io::{BufRead, BufReader, Cursor, Write};
     use std::os::unix::fs::PermissionsExt;
@@ -617,8 +627,12 @@ mod tests {
 
     #[test]
     fn empty_bridge_connection_is_a_normal_disconnect() {
-        assert!(!read_bridge_preface(&mut Cursor::new(b"")).unwrap());
-        assert!(read_bridge_preface(&mut Cursor::new(b"{}\n")).unwrap());
+        assert!(read_bridge_preface(&mut Cursor::new(b""))
+            .unwrap()
+            .is_none());
+        assert!(read_bridge_preface(&mut Cursor::new(b"{}\n"))
+            .unwrap()
+            .is_some());
         assert_eq!(
             read_bridge_preface(&mut Cursor::new(b"broken\n")).unwrap_err(),
             "Invalid LARP bridge identity"
@@ -734,6 +748,48 @@ mod tests {
     }
 
     #[test]
+    fn register_uses_the_registration_only_handshake() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let server_task = thread::spawn(move || {
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let preface: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(preface["registration"], true);
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap()["method"],
+                "initialize"
+            );
+            let mut writer = server;
+            writer
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}\n")
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("notifications/initialized"));
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["params"]["name"], "register");
+            writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":19,\"result\":{\"structuredContent\":{\"status\":\"registered\",\"client\":\"claude\"}}}\n").unwrap();
+        });
+        let client = Mutex::new(Some(client));
+        let response = bridge_request(
+            &|| Ok(client.lock().unwrap().take().unwrap()),
+            b"{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"tools/call\",\"params\":{\"name\":\"register\",\"arguments\":{\"name\":\"claude\"}}}\n",
+            false,
+        ).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&response).unwrap()["result"]["structuredContent"]
+                ["client"],
+            "claude"
+        );
+        server_task.join().unwrap();
+    }
+
+    #[test]
     fn bridge_initializes_and_lists_tools_while_server_is_down() {
         let output = Output(Arc::new(Mutex::new(Vec::new())));
         let captured = output.clone();
@@ -752,7 +808,7 @@ mod tests {
             .collect();
         assert_eq!(replies.len(), 3);
         assert_eq!(replies[0]["result"]["serverInfo"]["name"], "larp");
-        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 4);
         assert_eq!(
             replies[2]["error"]["message"],
             "LARP is not running; start it and retry"

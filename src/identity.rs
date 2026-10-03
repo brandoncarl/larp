@@ -277,7 +277,12 @@ mod mac {
             return None;
         }
         let parent = snapshot(bridge.ppid).ok()?;
-        if parent.uid != uid || registry.client_for_process(&parent.path).is_some() {
+        if parent.uid != uid
+            || registry
+                .clients
+                .values()
+                .any(|client| crate::registry::process_matches(&client.process, &parent.path))
+        {
             return None;
         }
         if snapshot(bridge_pid).ok()? != bridge || snapshot(parent.pid).ok()? != parent {
@@ -350,6 +355,19 @@ mod mac {
                 },
             );
             assert_eq!(identify(pid, uid, &registry).unwrap().1, "path-only");
+            assert_eq!(unregistered_process(pid, uid, &registry), None);
+            registry.clients.insert(
+                "overlap".into(),
+                Client {
+                    process: parent.path.clone(),
+                    identity: ClientIdentity::PathOnly,
+                    commands: BTreeSet::new(),
+                    secrets: BTreeSet::new(),
+                    exec: BTreeSet::new(),
+                },
+            );
+            assert!(identify(pid, uid, &registry).is_err());
+            // Ambiguous registrations must not become a new registration candidate.
             assert_eq!(unregistered_process(pid, uid, &registry), None);
             let _ = child.kill();
             let _ = child.wait();

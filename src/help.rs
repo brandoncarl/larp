@@ -36,6 +36,7 @@ fn text(topic: Option<&str>, context: Context) -> Result<&'static str, String> {
         None if matches!(context, Context::Cli) => r#"LARP: run local commands with 1Password secrets
 
   larp admin                  Manage clients, projects, and access
+  larp dash                   Open the local permissions dashboard
   larp start                  Approve 1Password and start the server
   larp mcp                    Connect an MCP client
   larp auth                   Check 1Password access
@@ -87,6 +88,7 @@ exit                                                        End this session
 
 Use `help <topic>` for details. Full `larp ...` commands also work here.
 Option+Left/Right moves by word; Up/Down browses history."#,
+        Some("dash") => "larp dash\nAuthenticate in the terminal and open a local browser dashboard.\nManage clients and check permissions on or off. Locks after 15 minutes of inactivity.\nCtrl+C closes the dashboard.",
         Some("client") => r#"Register the executable that calls LARP through MCP.
   client add <name> <absolute-process-path>
   client add                 Prompt for name and path
@@ -116,11 +118,14 @@ Command env changes only secret bindings; its clients need only the command gran
 Import reads NAME=op://... lines. It skips matches and asks about conflicts:
 Yes replaces, No keeps, Abort cancels the import. Grants stay in place.
 For a relative path, LARP shows the absolute path before reading."#,
-        Some("mcp") => r#"MCP tools for verified clients:
+        Some("mcp") => r#"MCP tools:
+  register(name)                 Request client registration; user confirms in larp start
   commands(project?)             List access across projects, or filter by project
   command(project, name, env?)   Run a saved command
   exec(project, argv, env?)      Run an argument array; requires exec access
 
+Register verifies the caller through the OS, requires confirmation and the admin password,
+and grants no permissions. Other tools require a registered client.
 env is an optional absolute path to a NAME=op://... file.
 Caller-supplied references must be registered and granted to the client.
 Saved command bindings are injected from the cache with the command grant."#,
@@ -153,7 +158,7 @@ pub fn maybe_print(words: &[&str], context: Context) -> Result<bool, String> {
     match words {
         [] | ["help" | "--help" | "-h"] => print(None, context)?,
         ["help", topic] => print(Some(topic), context)?,
-        ["mcp", "--help" | "-h"] => print(Some("mcp"), context)?,
+        [topic @ ("mcp" | "dash"), "--help" | "-h"] => print(Some(topic), context)?,
         ["help", topic, action] => print_action(topic, action)?,
         ["list", "--help" | "-h"] => print(Some("list"), context)?,
         [topic] if is_topic(topic) => print(Some(topic), context)?,
@@ -214,6 +219,8 @@ mod tests {
         assert!(maybe_print(&["help", "secret", "add"], Context::Cli).unwrap());
         assert!(maybe_print(&["help", "mcp"], Context::Cli).unwrap());
         assert!(!maybe_print(&["mcp"], Context::Cli).unwrap());
+        assert!(!maybe_print(&["dash"], Context::Cli).unwrap());
+        assert!(maybe_print(&["dash", "--help"], Context::Cli).unwrap());
         assert!(!maybe_print(&["client", "list"], Context::Cli).unwrap());
         assert!(!maybe_print(&["list"], Context::Cli).unwrap());
     }

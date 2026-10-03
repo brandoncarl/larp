@@ -586,7 +586,7 @@ fn confirm_secret_overwrite(
     }
 }
 
-fn add_client(registry: &mut Registry, name: &str, process: &str) -> Result<(), String> {
+pub(crate) fn add_client(registry: &mut Registry, name: &str, process: &str) -> Result<(), String> {
     registry::name(name)?;
     if registry.clients.contains_key(name) {
         return Err("client already exists; use 'client update' to replace it".into());
@@ -605,7 +605,11 @@ fn add_client(registry: &mut Registry, name: &str, process: &str) -> Result<(), 
     Ok(())
 }
 
-fn update_client(registry: &mut Registry, name: &str, process: &str) -> Result<(), String> {
+pub(crate) fn update_client(
+    registry: &mut Registry,
+    name: &str,
+    process: &str,
+) -> Result<(), String> {
     if !registry.clients.contains_key(name) {
         return Err("client does not exist".into());
     }
