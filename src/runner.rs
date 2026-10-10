@@ -247,7 +247,9 @@ impl Runner {
                 return Err("command environment uses a reserved variable name".into());
             }
             if !project_item.secrets.contains_key(name) {
-                return Err("command environment includes an unregistered secret".into());
+                return Err(format!(
+                    "command environment includes an unregistered secret: variable {variable:?} binds secret {name:?}; restore that secret registration or update the command bindings"
+                ));
             }
             let value = values
                 .get(&(project.to_owned(), name.to_owned()))

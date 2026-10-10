@@ -378,6 +378,7 @@ fn serve_inner<R: BufRead, W: Write>(
                         );
                         let mut attempt = attempt;
                         attempt.request_id = Some(request_id.clone());
+                        attempt.command = name.filter(|_| tool == Some("command"));
                         if audit.record(&attempt).is_err() {
                             error(
                                 &mut output,
@@ -422,6 +423,11 @@ fn serve_inner<R: BufRead, W: Write>(
                             decision,
                         );
                         event.request_id = Some(request_id.clone());
+                        event.command = name.filter(|_| tool == Some("command"));
+                        if let Err(message) = &result {
+                            event.error_code = Some(run_error_code(message));
+                            event.reason = Some(message);
+                        }
                         event.duration_ms = started.elapsed().as_millis();
                         if let Ok(outcome) = &result {
                             event.exit_code = outcome.status;
@@ -454,8 +460,8 @@ fn serve_inner<R: BufRead, W: Write>(
                             Err(message) if message == limits::BUSY => {
                                 eprintln!("! {client_name} · {project} / {action} · busy")
                             }
-                            Err(_) => {
-                                eprintln!("✗ {client_name} · {project} / {action} · rejected")
+                            Err(message) => {
+                                eprintln!("✗ {client_name} · {project} / {action} · rejected · {} · {message} · request {request_id}", run_error_code(message))
                             }
                         }
                     }
@@ -467,7 +473,7 @@ fn serve_inner<R: BufRead, W: Write>(
                         }}),
                         Err(message) => json!({"jsonrpc":"2.0","id":id,"result":{
                             "content":[{"type":"text","text":crate::ui::error_text(&message)}],
-                            "structuredContent":{"requestId":request_id,"retryable":message == limits::BUSY},
+                            "structuredContent":{"requestId":request_id,"retryable":message == limits::BUSY,"errorCode":run_error_code(&message)},
                             "isError":true
                         }}),
                     };
@@ -478,6 +484,16 @@ fn serve_inner<R: BufRead, W: Write>(
             }
             _ => error(&mut output, id, -32601, "Method not found")?,
         }
+    }
+}
+
+fn run_error_code(message: &str) -> &'static str {
+    if message.starts_with("command environment includes an unregistered secret:") {
+        "COMMAND_SECRET_UNREGISTERED"
+    } else if message == limits::BUSY {
+        "BUSY"
+    } else {
+        "COMMAND_REJECTED"
     }
 }
 
@@ -825,6 +841,69 @@ mod tests {
         assert!(!records.contains("dummy-secret-value"));
         assert!(!records.contains("sensitive-argument"));
         assert!(!records.contains("sensitive-request-id"));
+        assert!(!records.contains("op://"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_command_secret_is_identified_and_audited() {
+        let directory = std::env::temp_dir().join(format!(
+            "larp-missing-secret-{}-{}",
+            std::process::id(),
+            OsRng.next_u64()
+        ));
+        DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        let audit = Audit::in_dir(directory.clone(), 10 * 1024);
+        let mut runner = dummy();
+        runner
+            .registry
+            .projects
+            .get_mut("demo")
+            .unwrap()
+            .commands
+            .get_mut("inspect")
+            .unwrap()
+            .env
+            .insert("TURNSTILE_SECRET".into(), "TURNSTILE_SECRET".into());
+        let input = [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"command","arguments":{"project":"demo","name":"inspect"}}}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        let mut output = Vec::new();
+        serve(
+            Cursor::new(input),
+            &mut output,
+            &runner,
+            "test",
+            Some(&audit),
+            "path-only",
+        )
+        .unwrap();
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let result = &responses.last().unwrap()["result"];
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["retryable"], false);
+        assert_eq!(
+            result["structuredContent"]["errorCode"],
+            "COMMAND_SECRET_UNREGISTERED"
+        );
+        let records = fs::read_to_string(directory.join("audit.jsonl")).unwrap();
+        let event: Value = serde_json::from_str(records.lines().last().unwrap()).unwrap();
+        assert_eq!(event["command"], "inspect");
+        assert_eq!(event["decision"], "denied");
+        assert_eq!(event["errorCode"], "COMMAND_SECRET_UNREGISTERED");
+        assert_eq!(event["requestId"], result["structuredContent"]["requestId"]);
+        assert!(event["reason"]
+            .as_str()
+            .unwrap()
+            .contains("TURNSTILE_SECRET"));
+        assert!(event["executable"].is_null());
+        assert!(!records.contains("dummy-secret-value"));
         assert!(!records.contains("op://"));
         fs::remove_dir_all(directory).unwrap();
     }

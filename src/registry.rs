@@ -79,6 +79,31 @@ pub struct RegisteredCommand {
 }
 
 impl Registry {
+    /// Remove a secret and every dependency on it within its project.
+    pub fn remove_secret(&mut self, project: &str, name: &str) -> Result<Vec<String>, String> {
+        let item = self
+            .projects
+            .get_mut(project)
+            .ok_or("project does not exist")?;
+        if item.secrets.remove(name).is_none() {
+            return Err("secret does not exist".into());
+        }
+        let mut affected = Vec::new();
+        for (command_name, command) in &mut item.commands {
+            let before = command.env.len();
+            command.env.retain(|_, secret| secret != name);
+            if command.env.len() != before {
+                affected.push(command_name.clone());
+            }
+        }
+        for client in self.clients.values_mut() {
+            client
+                .secrets
+                .remove(&(project.to_owned(), name.to_owned()));
+        }
+        Ok(affected)
+    }
+
     pub fn rename_project(&mut self, old: &str, new: &str) -> Result<(), String> {
         name(new)?;
         if !self.projects.contains_key(old) {
@@ -220,7 +245,7 @@ pub fn env_name(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{Client, ClientIdentity, Project, RegisteredCommand, Registry};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn client_wildcards_are_confined_to_components() {
@@ -293,6 +318,85 @@ mod tests {
         );
         let saved = serde_json::to_string(&registry).unwrap();
         assert!(!saved.contains("\"env\""));
+    }
+
+    #[test]
+    fn removing_secret_cleans_bindings_and_grants_only_in_its_project() {
+        let mut registry = Registry::default();
+        let make_project = || {
+            let mut project = Project::default();
+            project
+                .secrets
+                .insert("token".into(), "op://vault/item/field".into());
+            project
+                .secrets
+                .insert("keep".into(), "op://vault/item/other".into());
+            for name in ["deploy", "plan"] {
+                project.commands.insert(
+                    name.into(),
+                    RegisteredCommand {
+                        argv: vec!["/bin/true".into()],
+                        cwd: "/tmp".into(),
+                        env: BTreeMap::from([
+                            ("ALIAS".into(), "token".into()),
+                            ("TOKEN".into(), "token".into()),
+                            ("KEEP".into(), "keep".into()),
+                        ]),
+                    },
+                );
+            }
+            project
+        };
+        registry.projects.insert("demo".into(), make_project());
+        registry.projects.insert("other".into(), make_project());
+        registry.clients.insert(
+            "agent".into(),
+            Client {
+                process: "/bin/true".into(),
+                identity: ClientIdentity::PathOnly,
+                commands: BTreeSet::from([("demo".into(), "deploy".into())]),
+                secrets: BTreeSet::from([
+                    ("demo".into(), "token".into()),
+                    ("demo".into(), "keep".into()),
+                    ("other".into(), "token".into()),
+                ]),
+                exec: BTreeSet::from(["demo".into()]),
+            },
+        );
+        let other = serde_json::to_value(&registry.projects["other"]).unwrap();
+        assert_eq!(
+            registry.remove_secret("demo", "token").unwrap(),
+            vec!["deploy", "plan"]
+        );
+        let project = &registry.projects["demo"];
+        assert!(!project.secrets.contains_key("token"));
+        assert!(project.secrets.contains_key("keep"));
+        for command in project.commands.values() {
+            assert_eq!(
+                command.env,
+                BTreeMap::from([("KEEP".into(), "keep".into())])
+            );
+            assert_eq!(command.argv, vec!["/bin/true"]);
+            assert_eq!(command.cwd, "/tmp");
+        }
+        assert_eq!(
+            serde_json::to_value(&registry.projects["other"]).unwrap(),
+            other
+        );
+        let client = &registry.clients["agent"];
+        assert_eq!(
+            client.secrets,
+            BTreeSet::from([
+                ("demo".into(), "keep".into()),
+                ("other".into(), "token".into())
+            ])
+        );
+        assert!(client.commands.contains(&("demo".into(), "deploy".into())));
+        assert!(client.exec.contains("demo"));
+        let before = serde_json::to_value(&registry).unwrap();
+        assert!(registry.remove_secret("demo", "missing").is_err());
+        assert!(registry.remove_secret("missing", "keep").is_err());
+        assert_eq!(serde_json::to_value(&registry).unwrap(), before);
     }
 
     #[test]

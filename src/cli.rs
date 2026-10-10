@@ -8,6 +8,7 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
     let mut registry = Registry::load()?;
     let mut changed = false;
     let mut import_report = None;
+    let mut removed_bindings = Vec::new();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["list"] => {
@@ -229,13 +230,7 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
             import_report = Some(plan);
         }
         ["secret", "remove", project, name] => {
-            let item = project_mut(&mut registry, project)?;
-            required_remove(item.secrets.remove(*name), "secret")?;
-            for client in registry.clients.values_mut() {
-                client
-                    .secrets
-                    .remove(&(project.to_string(), name.to_string()));
-            }
+            removed_bindings = registry.remove_secret(project, name)?;
             changed = true;
         }
         ["secret", "list", project] => {
@@ -351,6 +346,12 @@ pub fn run(args: &[String], _: &AdminSession) -> Result<(), String> {
         registry.save()?;
         if words.first() != Some(&"secret") || words.get(1) != Some(&"import") {
             crate::ui::success(&success_message(&words));
+            if !removed_bindings.is_empty() {
+                println!(
+                    "Removed command bindings from: {}.",
+                    removed_bindings.join(", ")
+                );
+            }
         }
     }
     if let Some(report) = import_report {
